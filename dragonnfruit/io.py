@@ -1,9 +1,11 @@
 # io.py
 # Author: Jacob Schreiber <jmschreiber91@gmail.com>
 
+import numpy
 import torch
+import pandas
 
-from bpnetlite import one_hot_encode
+from bpnetlite.io import one_hot_encode
 
 class DataGenerator(torch.utils.data.Dataset):
 	"""A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
@@ -32,7 +34,6 @@ class DataGenerator(torch.utils.data.Dataset):
 	
 	cell_states: 
 	"""
-
 
 	def __init__(self, sequence, signal, loci_file, neighbors, cell_states, 
 		read_depths, trimming, window, chroms, reverse_complement=True, 
@@ -94,19 +95,4 @@ class DataGenerator(torch.utils.data.Dataset):
 		c = torch.from_numpy(c)
 		r = torch.from_numpy(r)
 		return X, y, c, r
-
-def validation_data(sequence, signal, loci, neighbors, cell_states, 
-	read_depths, n_samples=80, trimming=2**4, window=1000, chroms=None):
-
-	data = DataGenerator(sequence=sequence, signal=signal, loci_file=peak_file, 
-		neighbors=neighbors, cell_states=cell_states, read_depths=read_depths,
-		trimming=trimming, window=window, chroms=chroms,
-		reverse_complement=False, max_jitter=0, random_state=0)
-
-	X, y, c, r = zip(*[data[i] for i in range(n_samples)])
-	X = torch.stack(X)
-	y = torch.stack(y)
-	c = torch.stack(c)
-	r = torch.stack(r)
-	return X, y, c, r
 	
