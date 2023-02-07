@@ -1,13 +1,18 @@
-# dragonnfruit.py
+# models.py
 # Author: Jacob Schreiber <jmschreiber91@gmail.com>
 
 import time
+import numpy
 import torch
 
 from bpnetlite.losses import MNLLLoss
-from bpnetlite.performance import pearson_corr
+from bpnetlite.losses import log1pMSELoss
 
-from .logging import Logger
+from bpnetlite.performance import pearson_corr
+from bpnetlite.performance import calculate_performance_measures
+
+from bpnetlite.logging import Logger
+
 
 class DragoNNFruit(torch.nn.Module):
 	"""An entire DragoNNFruit model with all components.
@@ -55,7 +60,7 @@ class DragoNNFruit(torch.nn.Module):
 		self.name = name
 		self.logger = Logger(["Epoch", "Iteration", "Training Time",
 			"Validation Time", "Training MNLL", "Validation MNLL",
-			"Validation Correlation"], verbose=True)
+			"Validation Correlation", "Saved?"], verbose=True)
 
 		self.read_depths = torch.nn.Linear(1, 1, bias=False)
 
@@ -176,10 +181,10 @@ class DragoNNFruit(torch.nn.Module):
 
 		X_valid, y_valid, c_valid, r_valid = zip(*[validation_data[i]
 			for i in range(n_validation_samples)])
-		X_valid = torch.stack(X_valid).cuda(non_blocking=True)
-		y_valid = torch.stack(y_valid).cuda(non_blocking=True)
-		c_valid = torch.stack(c_valid).cuda(non_blocking=True)
-		r_valid = torch.stack(r_valid).cuda(non_blocking=True)
+		X_valid = torch.stack(X_valid).cuda()
+		y_valid = torch.stack(y_valid).cuda()
+		c_valid = torch.stack(c_valid).cuda()
+		r_valid = torch.stack(r_valid).cuda()
 
 		y_bias_valid = self.bias.predict(X_valid)[0][:, 0].cuda()
 		y_bias_valid -= y_bias_valid.mean(dim=1, keepdims=True)
@@ -188,10 +193,10 @@ class DragoNNFruit(torch.nn.Module):
 		self.logger.start()
 		for epoch in range(max_epochs):
 			for i, (X, y, cell_states, read_depths) in enumerate(training_data):
-				X = X.cuda(non_blocking=True).squeeze()
-				y = y.cuda(non_blocking=True).squeeze()
-				cell_states = cell_states.cuda(non_blocking=True)
-				read_depths = read_depths.cuda(non_blocking=True)
+				X = X.cuda().squeeze()
+				y = y.cuda().squeeze()
+				cell_states = cell_states.cuda()
+				read_depths = read_depths.cuda()
 
 				train_loss = self._train_step(X, cell_states, read_depths, y,
 					optimizer)
@@ -204,26 +209,21 @@ class DragoNNFruit(torch.nn.Module):
 						r_valid, y_valid, y_bias_valid, batch_size)
 
 					valid_time = time.time() - tic
+
 					self.logger.add([epoch, i, train_time, valid_time, 
-						train_loss, valid_loss, valid_corr])
+						train_loss, valid_loss, valid_corr,
+						valid_corr > best_corr])
+
+					self.logger.save("{}.log".format(self.name))
 
 					if valid_corr > best_corr:
 						best_corr = valid_corr
-						self.save("best")
+						torch.save(self, "{}.best.torch".format(self.name))
+
 
 					start = time.time()
 
-			self.save(epoch)
-			self.logger.save("{}.log".format(self.name))
-
-	def save(self, suffix=""):
-		name = "{}.{}.dragonnfruit.torch".format(self.name, suffix)
-		dynamic_name = "{}.{}.dynamic.torch".format(self.name, suffix)
-		controller_name = "{}.{}.controller.torch".format(self.name, suffix)
-
-		torch.save(self, name)
-		torch.save(self.accessibility, dynamic_name)
-		torch.save(self.accessibility.controller, controller_name)
+					torch.save(self, "{}.{}.torch".format(self.name, epoch))
 
 
 class DynamicBPNet(torch.nn.Module):
@@ -271,21 +271,23 @@ class DynamicBPNet(torch.nn.Module):
 		self.n_nodes = n_nodes
 
 		self.iconv = torch.nn.Conv1d(4, n_filters, kernel_size=21, padding=10)
+		self.irelu = torch.nn.ReLU()
 		self.fconv = torch.nn.Conv1d(n_filters, 1, kernel_size=75, bias=False)
 
-		self.convs = []
-		self.biases = []
+		self.biases = torch.nn.ModuleList([
+			torch.nn.Linear(n_nodes, n_filters) for i in range(n_layers)
+		])
 
-		for i in range(n_layers):
-			bias = torch.nn.Linear(n_nodes, n_filters)
-			self.biases.append(bias)
+		self.convs = torch.nn.ModuleList([
+			torch.nn.Conv1d(n_filters, n_filters, kernel_size=3, stride=1, 
+				dilation=2**i, padding=2**i, bias=False) for i in range(1, 
+					n_layers+1)
+		])
 
-			conv = torch.nn.Conv1d(n_filters, n_filters, kernel_size=3, 
-				stride=1, dilation=2**(i+1), padding=2**(i+1), bias=False)
-			self.convs.append(conv)
+		self.relus = torch.nn.ModuleList([
+			torch.nn.ReLU() for i in range(n_layers)
+		])
 
-		self.convs = torch.nn.ModuleList(self.convs)
-		self.biases = torch.nn.ModuleList(self.biases)
 		self.controller = controller
 
 	def forward(self, X, cell_states):
@@ -317,13 +319,10 @@ class DynamicBPNet(torch.nn.Module):
 		
 		cell_states = self.controller(cell_states)
 
-		X = torch.nn.ReLU()(self.iconv(X))
+		X = self.irelu(self.iconv(X))
 		for i in range(self.n_layers):
 			#weights = self.convs[i](cell_states_)
 			#weights = weights.view(self.n_filters*X.shape[0], self.n_filters, 3)
-
-			X_conv = self.convs[i](X)
-			X_bias = self.biases[i](cell_states).unsqueeze(-1)
 
 			#X_conv = X.view(1, -1, X.shape[2])
 			#X_conv = torch.nn.functional.conv1d(X_conv, weights,
@@ -331,9 +330,12 @@ class DynamicBPNet(torch.nn.Module):
 			#	groups=X.shape[0])
 			#X_conv = X_conv.view(*X.shape)
 
-			X = X + torch.nn.ReLU()(X_conv + X_bias)
+			X_conv = self.convs[i](X)
+			X_bias = self.biases[i](cell_states).unsqueeze(-1)
 
-		y_profile = self.fconv(X).squeeze()
+			X = X + self.relus[i](X_conv + X_bias)
+
+		y_profile = self.fconv(X)[:, 0]
 		y_profile = y_profile[:, start:end]
 		return y_profile
 
@@ -414,13 +416,17 @@ class CellStateController(torch.nn.Module):
 		self.n_outputs = n_outputs
 		self.n_layers = n_layers
 
-		fcs = [torch.nn.Linear(n_inputs, n_nodes)]
-		for i in range(self.n_layers):
-			fc = torch.nn.Linear(n_nodes, n_nodes)
-			fcs.append(fc)
+		self.ifc = torch.nn.Linear(n_inputs, n_nodes)
+		self.irelu = torch.nn.ReLU()
 
-		fcs.append(torch.nn.Linear(n_nodes, n_outputs))
-		self.fcs = torch.nn.ModuleList(fcs)
+		self.fcs = torch.nn.ModuleList([
+			torch.nn.Linear(n_nodes, n_nodes) for i in range(n_layers)
+		])
+		self.relus = torch.nn.ModuleList([
+			torch.nn.ReLU() for i in range(n_layers)
+		])
+
+		self.ffc = torch.nn.Linear(n_nodes, n_outputs)
 
 	def forward(self, cell_states):
 		"""A forward pass through the network.
@@ -443,9 +449,11 @@ class CellStateController(torch.nn.Module):
 			A tensor representing the transformed state of each cell.
 		"""
 
-		for layer in self.fcs:
-			cell_states = torch.nn.ReLU()(layer(cell_states))
+		cell_states = self.irelu(self.ifc(cell_states))
+		for i in range(self.n_layers):
+			cell_states = self.relus[i](self.fcs[i](cell_states))
 
+		cell_states = self.ffc(cell_states)
 		return cell_states
 
 
