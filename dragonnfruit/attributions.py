@@ -34,7 +34,7 @@ class ProfileWrapper(torch.nn.Module):
 		logits = self.model(X, cell_states)
 		logits = logits - torch.mean(logits, dim=-1, keepdims=True) 
 		l = torch.clone(logits).detach()
-
+		
 		y = torch.exp(l - torch.logsumexp(l, dim=-1, keepdims=True))
 		return (logits * y).sum(axis=-1, keepdims=True)
 
@@ -44,16 +44,19 @@ def calculate_attributions(model, X, cell_states, n_shuffles=10, batch_size=1):
 	ig = DeepLiftShap(wrapper)
 
 	reference = dinucleotide_shuffle(X, n_shuffles=n_shuffles).cuda()
+	reference = reference.type(X.dtype)
+	
 	X = X.unsqueeze(0).cuda()
+	_cell_states = cell_states.cuda()
 
 	attributions = []
 	with torch.no_grad():
 		for start in trange(0, len(cell_states), batch_size):
-			c_ = cell_states[start:start+batch_size].cuda()
+			c_ = _cell_states[start:start+batch_size]
 			X_ = X.expand(len(c_), -1, -1)
 			
 			attr = ig.attribute(X_, reference, target=0, 
-				additional_forward_args=(c_,),
+				additional_forward_args=(c_,), 
 				custom_attribution_func=hypothetical_attributions)
 
 			attr = (attr * X_).cpu()

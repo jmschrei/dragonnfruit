@@ -6,7 +6,7 @@ setup(
     author='Jacob Schreiber',
     author_email='jmschreiber91@gmail.com',
     packages=['dragonnfruit'],
-    scripts=[],
+    scripts=['cmd/dragonnfruit'],
     url='https://github.com/jmschrei/dragonnfruit',
     license='LICENSE.txt',
     description='dragonnfruit is a method for analyzing scATAC-seq experiments.',
