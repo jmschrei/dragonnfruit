@@ -5,6 +5,8 @@ import time
 import numpy
 import torch
 
+from tqdm import trange
+
 from bpnetlite.losses import MNLLLoss
 from bpnetlite.losses import log1pMSELoss
 
@@ -174,10 +176,11 @@ class DragoNNFruit(torch.nn.Module):
 
 		y_acc = self.accessibility(X, cell_states)
 		y_bias_profile, y_bias_counts = self.bias(X)
-		return y_acc + y_bias_profile[:,0] + read_depths + y_bias_counts
+		return y_acc + read_depths + y_bias_counts # + y_bias_profile[:,0]
 		
 	@torch.no_grad()
-	def predict(self, X, cell_states, read_depths, batch_size=16):
+	def predict(self, X, cell_states, read_depths, batch_size=16, 
+		reduction=None, verbose=False):
 		"""A method for making batched predictions.
 
 		This method will take in a large number of cell states and provide
@@ -201,41 +204,93 @@ class DragoNNFruit(torch.nn.Module):
 		batch_size: int, optional
 			The number of elements to use in each batch. Default is 64.
 
+		reduction: None, 'logsumexp', or 'sum', optional
+			Whether to reduce the predictions along the final axis. Useful to
+			reduce the memory overhead of making large number of predictions.
+			If None, perform no reduction. Default is None.
+
+		verbose: bool, optional
+			Whether to display a progress bar across batches. Default is False.
+
 
 		Returns
 		-------
-		y_hat: torch.tensor, shape=(-1, 1000)
+		y_hat: torch.tensor, shape=(-1, 1000) or (-1, 1)
 			A tensor containing the predicted profiles.
 		"""		
 
 		y_hat = []
-		for start in range(0, len(X), batch_size):
+		for start in trange(0, len(X), batch_size, disable=not verbose):
 			X_batch = X[start:start+batch_size]
 			cs_batch = cell_states[start:start+batch_size]
 			rd_batch = read_depths[start:start+batch_size]
 
 			y_hat_ = self(X_batch, cs_batch, rd_batch)
+			if reduction == 'sum':
+				y_hat_ = torch.sum(y_hat_, dim=-1)
+			elif reduction == 'logsumexp':
+				y_hat_ = torch.logsumexp(y_hat_, dim=-1)
+
 			y_hat.append(y_hat_)
 
 		y_hat = torch.cat(y_hat)
 		return y_hat
 
 	@torch.no_grad()
-	def _evaluate(self, X, cell_states, read_depths, y, y_bias, batch_size):
-		y_acc = self.accessibility.predict(X, cell_states, batch_size)
-		y_hat = y_acc + y_bias + read_depths
+	def predict_cross(self, X, cell_states, read_depths, batch_size=64,
+		reduction=None, verbose=False):
+		"""A method for making batched predictions on a locus/cell cross.
 
-		y_hat_ = torch.nn.functional.log_softmax(y_hat.flatten(), dim=-1)
-		loss = MNLLLoss(y_hat_, y.flatten()).item()
+		This method makes predictions for a cross between loci and cell states.
+		Use this method and not `predict` when you want to make predictions
+		for all loci for all cell states. Because the cross is constructed
+		in batches the amount of memory required is limited and the size
+		of the loci and cell states do not need to match in the first
+		dimension.
 
-		y_hat_ = torch.logsumexp(y_hat, dim=-1)
-		count_corr = pearson_corr(y_hat_, y.sum(dim=-1)).mean().item()
 
-		y_hat = torch.nn.functional.log_softmax(y_hat, dim=-1)
-		y_hat = torch.exp(y_hat)
+		Parameters
+		----------
+		X: torch.tensor, shape=(n_loci, 4, 2114)
+			A one-hot encoded sequence tensor.
 
-		profile_corr = pearson_corr(y_hat, y).mean().item()
-		return loss, profile_corr, count_corr
+		cell_states: torch.tensor, shape=(n_states, n_inputs)
+			A tensor representing the state of each cell that is passed into
+			the model, e.g. through PCA or LSI.
+
+		read_depths: torch.tensor, shape=(n_states, 1)
+			A tensor containing the read depth of each cell or aggregated
+			across similar cells.
+
+		batch_size: int, optional
+			The number of elements to use in each batch. Default is 64.
+
+		reduction: None, 'logsumexp', or 'sum', optional
+			Whether to reduce the predictions along the final axis. Useful to
+			reduce the memory overhead of making large number of predictions.
+			If None, perform no reduction. Default is None.
+
+		verbose: bool, optional
+			Whether to display a progress bar across states. Default is False.
+
+
+		Returns
+		-------
+		y_hat: torch.tensor, shape=(n_loci, n_states, 1000)
+			A tensor containing the predicted profiles.
+		"""		
+
+		n_states = cell_states.shape[0]
+		y_hat = []
+
+		for i in trange(n_states, disable=not verbose):
+			_y_hat = self.predict(X, cell_states[i:i+1].expand(X.shape[0], -1), 
+				read_depths=read_depths[i:i+1].expand(X.shape[0], -1),
+				batch_size=batch_size, reduction=reduction)
+			y_hat.append(_y_hat)
+
+		return torch.stack(y_hat)
+
 
 	def _train_step(self, X, cell_states, read_depths, y, optimizer):
 		optimizer.zero_grad()
@@ -265,9 +320,6 @@ class DragoNNFruit(torch.nn.Module):
 		c_valid = torch.stack(c_valid).cuda()
 		r_valid = torch.stack(r_valid).cuda()
 
-		y_bias_profile, y_bias_counts = self.bias.predict(X_valid)
-		y_bias_valid = y_bias_profile[:,0].cuda() + y_bias_counts.cuda()
-
 		start, best_corr = time.time(), 0
 		self.logger.start()
 		for epoch in range(max_epochs):
@@ -284,20 +336,36 @@ class DragoNNFruit(torch.nn.Module):
 					train_time = time.time() - start
 					tic = time.time()
 
-					valid_loss, valid_p_corr, valid_c_corr = self._evaluate(
-						X_valid, c_valid, r_valid, y_valid, y_bias_valid, 
-						batch_size)
+					# Make predictions
+					y_hat = self.predict(X_valid, c_valid, r_valid, batch_size)
+					
+					# Calculate MNLL loss
+					y_hat_ = torch.nn.functional.log_softmax(y_hat.flatten(), 
+						dim=-1)
+					valid_loss = MNLLLoss(y_hat_, y_valid.flatten()).item()
+
+					# Calculate count correlation
+					y_hat_ = torch.logsumexp(y_hat, dim=-1)
+					valid_count_corr = pearson_corr(y_hat_, y_valid.sum(dim=-1))
+					valid_count_corr = valid_count_corr.mean().item()
+
+					# Calculate profile correlation
+					y_hat = torch.nn.functional.log_softmax(y_hat.flatten(), 
+						dim=-1).reshape(*y_hat.shape)
+					y_hat = torch.exp(y_hat)
+					valid_profile_corr = pearson_corr(y_hat, 
+						y_valid).mean().item()
 
 					valid_time = time.time() - tic
 
 					self.logger.add([epoch, i, train_time, valid_time, 
-						train_loss, valid_loss, valid_p_corr, valid_c_corr,
-						valid_p_corr > best_corr])
+						train_loss, valid_loss, valid_profile_corr, 
+						valid_count_corr, valid_profile_corr > best_corr])
 
 					self.logger.save("{}.log".format(self.name))
 
-					if valid_p_corr > best_corr:
-						best_corr = valid_p_corr
+					if valid_profile_corr > best_corr:
+						best_corr = valid_profile_corr
 						torch.save(self, "{}.best.torch".format(self.name))
 
 					start = time.time()
@@ -413,12 +481,16 @@ class DynamicBPNet(torch.nn.Module):
 		return y_profile
 
 	@torch.no_grad()
-	def predict(self, X, cell_states, batch_size=64):
+	def predict(self, X, cell_states, batch_size=64, reduction=None, 
+		verbose=False):
 		"""A method for making batched predictions.
 
-		This method will take in a large number of cell states and provide
-		predictions in a batched manner without storing the gradients. Useful
-		for inference step.
+		This method makes predictions for a paired set of loci and cell states.
+		Each locus and cell state are considered individually and so the number
+		of loci must match the number of cell states even if many predictions
+		are being made for the same cell state or locus. In that case, one
+		must pass copies of the locus or cell state to ensure that the shapes
+		match.
 
 
 		Parameters
@@ -433,6 +505,14 @@ class DynamicBPNet(torch.nn.Module):
 		batch_size: int, optional
 			The number of elements to use in each batch. Default is 64.
 
+		reduction: None, 'logsumexp', or 'sum', optional
+			Whether to reduce the predictions along the final axis. Useful to
+			reduce the memory overhead of making large number of predictions.
+			If None, perform no reduction. Default is None.
+
+		verbose: bool, optional
+			Whether to display a progress bar across batches. Default is False.
+
 
 		Returns
 		-------
@@ -441,15 +521,70 @@ class DynamicBPNet(torch.nn.Module):
 		"""		
 
 		y_hat = []
-		for start in range(0, len(X), batch_size):
+		for start in trange(0, len(X), batch_size, disable=not verbose):
 			X_batch = X[start:start+batch_size]
 			cs_batch = cell_states[start:start+batch_size]
 
 			y_hat_ = self(X_batch, cs_batch)
+			if reduction == 'sum':
+				y_hat_ = torch.sum(y_hat_, dim=-1)
+			elif reduction == 'logsumexp':
+				y_hat_ = torch.logsumexp(y_hat_, dim=-1)
+
 			y_hat.append(y_hat_)
 
 		y_hat = torch.cat(y_hat)
 		return y_hat
+
+	@torch.no_grad()
+	def predict_cross(self, X, cell_states, batch_size=64, reduction=None,
+		verbose=False):
+		"""A method for making batched predictions on a locus/cell cross.
+
+		This method makes predictions for a cross between loci and cell states.
+		Use this method and not `predict` when you want to make predictions
+		for all loci for all cell states. Because the cross is constructed
+		in batches the amount of memory required is limited and the size
+		of the loci and cell states do not need to match in the first
+		dimension.
+
+
+		Parameters
+		----------
+		X: torch.tensor, shape=(n_loci, 4, 2114)
+			A one-hot encoded sequence tensor.
+
+		cell_states: torch.tensor, shape=(n_states, n_inputs)
+			A tensor representing the state of each cell that is passed into
+			the model, e.g. through PCA or LSI.
+
+		batch_size: int, optional
+			The number of elements to use in each batch. Default is 64.
+
+		reduction: None, 'logsumexp', or 'sum', optional
+			Whether to reduce the predictions along the final axis. Useful to
+			reduce the memory overhead of making large number of predictions.
+			If None, perform no reduction. Default is None.
+
+		verbose: bool, optional
+			Whether to display a progress bar across states. Default is False.
+
+
+		Returns
+		-------
+		y_hat: torch.tensor, shape=(n_loci, n_states, 1000)
+			A tensor containing the predicted profiles.
+		"""		
+
+		n_states = cell_states.shape[0]
+		y_hat = []
+
+		for i in trange(n_states, disable=not verbose):
+			_y_hat = self.predict(X, cell_states[i:i+1].expand(X.shape[0], -1), 
+				batch_size=batch_size, reduction=reduction)
+			y_hat.append(_y_hat)
+
+		return torch.stack(y_hat)
 
 	def load_conv_weights(self, filename, freeze=False):
 		"""Load convolution weights from a pretrained ChromBPNet model.
