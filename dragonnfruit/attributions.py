@@ -4,6 +4,7 @@
 import numpy
 import torch
 
+from tqdm import tqdm
 from tqdm import trange
 from captum.attr import DeepLiftShap
 
@@ -63,7 +64,7 @@ def calculate_attributions(model, X, cell_states, n_shuffles=10, batch_size=1,
 		attr = (attr * X_).cpu()
 		attributions.append(attr)
 	
-	attributions = torch.cat(attributions)    
+	attributions = torch.cat(attributions).detach()
 	return attributions
 
 def calculate_attributions_cross(model, X, cell_states, n_shuffles=10, 
@@ -71,10 +72,9 @@ def calculate_attributions_cross(model, X, cell_states, n_shuffles=10,
 	n_loci, n_states = cell_states.shape[0], cell_states.shape[0]
 	y_attr = []
 
-	for i in range(n_loci):
-		_X = X[i:i+1].expand(n_states, -1, -1)
-		_y_attr = calculate_attributions(model, _X, cell_states, 
-			n_shuffles=n_shuffles, batch_size=batch_size, verbose=verbose)
+	for x in tqdm(X, disable=not verbose):
+		_y_attr = calculate_attributions(model, x, cell_states, 
+			n_shuffles=n_shuffles, batch_size=batch_size, verbose=False)
 		y_attr.append(_y_attr)
 
-	return torch.stack(y_attr).permute(1, 0, 2)
+	return torch.stack(y_attr).permute(1, 0, 2, 3)

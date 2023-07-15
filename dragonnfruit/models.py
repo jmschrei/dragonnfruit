@@ -176,7 +176,7 @@ class DragoNNFruit(torch.nn.Module):
 
 		y_acc = self.accessibility(X, cell_states)
 		y_bias_profile, y_bias_counts = self.bias(X)
-		return y_acc + read_depths + y_bias_counts # + y_bias_profile[:,0]
+		return y_acc + read_depths + y_bias_profile[:,0] #+ y_bias_counts
 		
 	@torch.no_grad()
 	def predict(self, X, cell_states, read_depths, batch_size=16, 
