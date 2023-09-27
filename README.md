@@ -1,7 +1,7 @@
 ![image](https://github.com/jmschrei/dragonnfruit/assets/3916816/10f835ca-8feb-43fd-84d8-630d8018379c)
 
 > **Note**
-> IMPORTANT: This repository and it's associated documentation are under active development. Features may change. We are aiming to have a preprint out by the end of August 2023. 
+> IMPORTANT: This repository and it's associated documentation are under active development. Features may change. We are aiming to have a preprint out by the end of <s>August</s> November 2023. 
 
 DragoNNFruit is a method for dissecting the cis- and trans-regulatory factors underlying chromatin accessibility at single-cell and base-pair resolution. At a high level, DragoNNFruit models cis-regulatory sequence using a convolutional neural network whose parameters are dynamically generated from a second network that models trans-regulatory state (from ATAC-seq, RNA-seq, spatial coordinates, etc). Through the inclusion of an explicit model of Tn5 bias, DragoNNFruit’s de-noised predictions reveal TF footprints that cannot be observed from the original, biased, data. Taken together, DragoNNFruit’s capabilities enable the identification of cell type-specific motifs and their higher-order syntax, the prediction of variant effect and footprinting genome-wide, and the tracking of all these across entire single-cell experiments without the need for manual cell clustering and annotation.
 
