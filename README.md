@@ -11,6 +11,8 @@ By explicitly modeling both cis- and trans-regulatory factors, DragoNNFruit depa
 
 `pip install dragonnfruit`
 
+You will need to install PyTables to save to and read from `.h5` files using the command-line tool. Unfortunately, PyTables is not pip installable, so you will also need to run `conda install pytables`. 
+
 ### Usage
 
 #### Training a DragoNNFruit Model
