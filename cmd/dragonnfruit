@@ -1,0 +1,502 @@
+#!/usr/bin/env python
+# dragonnfruit command-line tool
+# Author: Jacob Schreiber <jmschreiber91@gmail.com>
+
+import os
+os.environ['TORCH_CUDNN_V8_API_ENABLED'] = '1'
+
+import sys
+import json
+import numpy
+import torch
+import pyfaidx
+import argparse
+
+import h5py
+import hdf5plugin
+
+import scipy
+from scipy import sparse
+
+from dragonnfruit.preprocessing import extract_fragments
+from dragonnfruit.preprocessing import preprocess_sparse_atac
+
+from dragonnfruit.io import LocusGenerator
+from dragonnfruit.io import GWGenerator
+
+from dragonnfruit.models import CellStateController
+from dragonnfruit.models import DynamicBPNet
+from dragonnfruit.models import DragoNNFruit
+
+torch.backends.cudnn.benchmark = True
+
+
+desc = """dragonnfruit is an extension of ChromBPNet for single-cell data.
+	At a high level, it takes in nucleotide sequence and some aspect of cell
+	state, such as an LSI matrix from scATAC-seq data or gene expression data
+	from multimodal data, and makes predictions for dynamically pseudobulked
+	scATAC-seq signal. It works by running the cell state representation through
+	a small multi-layer perceptron and outputting the convolution parameters
+	in the accessibility component of a ChromBPNet model. Put another way: 
+	after training a dragonnfruit model, one can produce a ChromBPNet model
+	for each cell in the experiment.""" 
+
+_help = """Must be either 'preprocess', 'fit', 'predict', 'interpret', 
+	'marginalize', or 'pipeline'."""
+
+
+# Read in the arguments
+parser = argparse.ArgumentParser(description=desc)
+subparsers = parser.add_subparsers(help=_help, required=True, dest='cmd')
+
+preprocess_help = """Preprocess a set of fragment files, and optionally
+	inclusion/exclusion matrices, into a set of sparse matrices used in training
+	the dragonnfruit model."""
+preprocess_parser = subparsers.add_parser("preprocess-atac", help=preprocess_help)
+preprocess_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters for preprocessing the data.")
+
+train_parser = subparsers.add_parser("fit", help="Fit a DragoNNFruit model.")
+train_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters for fitting the model.")
+
+predict_parser = subparsers.add_parser("predict", 
+	help="Make predictions using a trained DragoNNFruit model.")
+predict_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters for making predictions.")
+
+interpret_parser = subparsers.add_parser("interpret", 
+	help="Make interpretations using a trained DragoNNFruit model.")
+interpret_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters for calculating attributions.")
+
+marginalize_parser = subparsers.add_parser("marginalize", 
+	help="Run marginalizations given motifs.")
+marginalize_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters for calculating attributions.")
+
+pipeline_parser = subparsers.add_parser("pipeline", 
+	help="Run each step on the given files.")
+pipeline_parser.add_argument("-p", "--parameters", type=str, required=True,
+	help="A JSON file containing the parameters used for each step.")
+
+
+###
+# Default Parameters
+###
+
+
+default_preprocess_atac_parameters = {
+	'fragments': None,
+	'loci': None,
+	'signals':'dragonnfruit_data.h5',
+	'read_depths':'atac_read_depths.npz',
+	'count_matrix': 'atac_cellxpeak_counts.npz',
+	'pca': 'atac_pca.npz',
+	'neighbors': 'atac_neighbors.npz',
+	'chrom_sizes': None,
+	'include_cells': None,
+	'exclude_cells': None,
+	'chroms': ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 
+		'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 
+		'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 
+		'chr22', 'chrX'],
+	'cell_name_prefixes': None,
+	'max_fragment_length': 1000,
+	'start_offset': 4,
+	'end_offset': -5,
+	'n_components': 50,
+	'n_neighbors': 500,
+	'n_jobs': -1,
+	'verbose': False
+}
+
+default_fit_parameters = {
+	'n_filters': 256,
+	'n_layers': 8,
+	'bias_n_filters': 256,
+	'bias_n_layers': 4,
+	'controller_n_nodes': 1024,
+	'controller_n_layers': 1,
+	'controller_n_outputs': 128,
+	'profile_output_bias': True,
+	'count_output_bias': True,
+	'name': None,
+	'batch_size': 64,
+	'in_window': 2114,
+	'out_window': 1000,
+	'max_jitter': 128,
+	'reverse_complement': True,
+	'max_epochs': 50,
+	'validation_iter': 100,
+	'lr': 0.0001,
+	'alpha': 10,
+	'beta': 0.5,
+	'verbose': False,
+	'bias_model': None,
+
+	'min_counts': None,
+	'max_counts': None,
+
+	'training_chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 
+		'chr9', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 
+		'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX'],
+	'validation_chroms': ['chr8', 'chr10'],
+	'sequences': None,
+	'signals': None,
+	'cell_states': None,
+	'neighbors': None,
+	'read_depths': None,
+	'random_state': None,
+	'k': 500
+}
+
+default_predict_parameters = {
+	'batch_size': 64,
+	'in_window': 2114,
+	'out_window': 1000,
+	'verbose': False,
+	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
+		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
+		'chr20', 'chr21', 'chr22', 'chrX'],
+	'sequences': None,
+	'loci': None,
+	'controls': None,
+	'model': None,
+	'profile_filename': 'y_profile.npz',
+	'counts_filename': 'y_counts.npz'
+}
+
+default_interpret_parameters = {
+	'batch_size': 1,
+	'in_window': 2114,
+	'out_window': 1000,
+	'verbose': False,
+	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
+		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
+		'chr20', 'chr21', 'chr22', 'chrX'],
+	'sequences': None,
+	'loci': None,
+	'model': None,
+	'output': 'profile',
+	'ohe_filename': 'ohe.npz',
+	'attr_filename': 'attr.npz',
+	'n_shuffles':20,
+	'random_state':0
+}
+
+default_marginalize_parameters = {
+	'batch_size': 64,
+	'in_window': 2114,
+	'out_window': 1000,
+	'verbose': False,
+	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
+		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
+		'chr20', 'chr21', 'chr22', 'chrX'],
+	'sequences': None,
+	'motifs': None,
+	'loci': None,
+	'n_loci': None,
+	'shuffle': False,
+	'model': None,
+	'output_filename':'marginalize/',
+	'random_state':0,
+	'minimal': True
+}
+
+default_pipeline_parameters = {
+	# Model architecture parameters
+	'n_filters': 64,
+	'n_layers': 8,
+	'bias_n_filters': 64,
+	'bias_n_layers': 4,
+	'profile_output_bias': True,
+	'count_output_bias': True,
+	'in_window': 2114,
+	'out_window': 1000,
+	'name': None,
+	'model': None,
+	'bias_model': None,
+	'accessibility_model': None,
+
+	# Data parameters
+	'batch_size': 64,
+	'max_jitter': 128,
+	'reverse_complement': True,
+	'max_epochs': 50,
+	'validation_iter': 100,
+	'lr': 0.001,
+	'alpha': 1,
+	'verbose': False,
+	'min_counts': 0,
+	'max_counts': 99999999,
+	'training_chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 
+		'chr9', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 
+		'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX'],
+	'validation_chroms': ['chr8', 'chr10'],
+	'random_state': None,
+
+	# Input file parameters
+	'sequences': None,
+	'loci': None,
+	'negatives': None,
+	'signals': None,
+	'controls': None,
+
+	# Output file parameters
+	'profile_filename': None,
+	'counts_filename': None,
+
+	'output': 'profile',
+	'ohe_filename': None,
+	'attr_filename': None,
+	'n_shuffles':20,
+
+	'n_seqlets': 100000,
+	'modisco_filename': None,
+	'modisco_motifs': None,
+
+	'n_loci': None,
+	'shuffle': False,
+	'marginalization_filename': None,
+	'marginalization_motifs': None,
+	'minimal': True
+}
+
+
+###
+# Commands
+###
+
+
+def save_data(filename, X):
+	outfile = h5py.File(filename, 'w')
+
+	for chrom, data in X.items():
+		outfile.create_dataset(chrom + "_data", data=data.data, 
+			**hdf5plugin.Blosc(clevel=9))
+		outfile.create_dataset(chrom + "_indices", data=data.indices,
+			**hdf5plugin.Blosc(clevel=9))
+		outfile.create_dataset(chrom + "_indptr", data=data.indptr,
+			**hdf5plugin.Blosc(clevel=9))
+		outfile.create_dataset(chrom + "_dims", data=numpy.array(data.shape))
+
+	outfile.close()
+
+
+def load_data(filename):
+	X = {}
+	infile = h5py.File(filename, 'r')
+	
+	chroms = set()
+	for chrom in infile.keys():
+		chrom = '_'.join(chrom.split("_")[:-1])
+		if chrom not in chroms:
+			chroms.add(chrom)
+	
+	for chrom in chroms:
+		data = infile[chrom + "_data"]
+		indices = infile[chrom + "_indices"]
+		indptr = infile[chrom + "_indptr"]
+		dims = infile[chrom + "_dims"]
+	
+		X_csc = scipy.sparse.csc_matrix((data, indices, indptr), shape=dims)
+		X[chrom] = X_csc
+	
+	return X
+
+
+
+def merge_parameters(parameters, default_parameters):
+	"""Merge the provided parameters with the default parameters.
+
+	
+	Parameters
+	----------
+	parameters: str
+		Name of the JSON folder with the provided parameters
+
+	default_parameters: dict
+		The default parameters for the operation.
+
+
+	Returns
+	-------
+	params: dict
+		The merged set of parameters.
+	"""
+
+	with open(parameters, "r") as infile:
+		parameters = json.load(infile)
+
+	optional = ['controls', 'cell_representation', 'bias_model', 'min_counts', 
+		'max_counts']
+
+	for parameter, value in default_parameters.items():
+		if parameter not in parameters:
+			if value is None and parameter not in optional:
+				raise ValueError("Must provide value for '{}'".format(parameter))
+
+			parameters[parameter] = value
+
+	return parameters
+
+
+# Pull the arguments
+args = parser.parse_args()
+
+
+# Preprocess a fragment file into everything needed
+if args.cmd == "preprocess-atac":
+	parameters = merge_parameters(args.parameters, 
+		default_preprocess_atac_parameters)
+
+	###
+
+	if parameters['verbose']:
+		print("Converting fragment files to sparse matrices...")
+
+	X_cscs, read_depths = extract_fragments(
+		fragments=parameters['fragments'],
+		chrom_sizes=parameters['chrom_sizes'],
+		chroms=parameters['chroms'],
+		include_cells=parameters['include_cells'],
+		exclude_cells=parameters['exclude_cells'],
+		cell_name_prefixes=parameters['cell_name_prefixes'],
+		max_fragment_length=parameters['max_fragment_length'],
+		start_offset=parameters['start_offset'],
+		end_offset=parameters['end_offset'],
+		n_jobs=parameters['n_jobs'],
+		verbose=parameters['verbose']
+	)
+
+	if parameters['verbose']:
+		print("Saving sparse matrices and read depths...")
+
+	save_data(parameters['signals'], X_cscs)
+	numpy.savez_compressed(parameters['read_depths'], read_depths)
+
+	if parameters['verbose']:
+		print("Calculating cell state representations...")
+
+	cellxlocus, X_pca, neighbors = preprocess_sparse_atac(X_cscs, 
+		peaks=parameters['loci'], chroms=parameters['chroms'],
+		n_components=parameters['n_components'], 
+		n_neighbors=parameters['n_neighbors'],
+		verbose=parameters['verbose'])
+
+	if parameters['verbose']:
+		print("Storing cell state representations...")
+
+	scipy.sparse.save_npz(parameters['count_matrix'], cellxlocus)
+	numpy.savez_compressed(parameters['pca'], X_pca)
+	numpy.savez_compressed(parameters['neighbors'], neighbors)
+
+
+# Fit a DragoNNFruit model
+if args.cmd == 'fit':
+	parameters = merge_parameters(args.parameters, default_fit_parameters)
+
+	###
+
+	torch.manual_seed(parameters['random_state'])
+	numpy.random.seed(parameters['random_state'])
+
+	###
+	# Load single-cell data
+
+	k = parameters['k']
+
+	if parameters['neighbors'][-4:] == '.npz':
+		neighbors = numpy.load(parameters['neighbors'])['arr_0'][:, :k]
+	else:
+		neighbors = numpy.load(parameters['neighbors'])[:, :k]
+
+	if parameters['cell_states'][-4:] == '.npz':
+		cell_states = numpy.load(parameters['cell_states'])['arr_0']
+	else:
+		cell_states = numpy.load(parameters['cell_states'])
+
+	cell_states = cell_states.astype('float32')
+	cell_states_mean = cell_states.mean(axis=0, keepdims=True)
+	cell_states_std = cell_states.std(axis=0, keepdims=True)
+	cell_states = (cell_states - cell_states_mean) / cell_states_std
+
+	if parameters['read_depths'][-4:] == '.npz':
+		read_depths = numpy.load(parameters['read_depths'])['arr_0']
+	else:
+		read_depths = numpy.load(parameters['read_depths'])
+
+	read_depths = read_depths[neighbors].sum(axis=0)
+	read_depths = numpy.log2(read_depths + 1)
+	read_depths = read_depths.reshape(-1, 1)
+
+	chroms = parameters['training_chroms'] + parameters['validation_chroms']
+
+	signal = load_data(parameters['signal'])
+	sequence = {}
+	for chrom in chroms:
+		sequence[chrom] = numpy.load("{}/{}.npy".format(parameters['sequences'], 
+			chrom))
+
+	#print("Done loading sc-data")
+	###
+
+	X = torch.utils.data.DataLoader(
+		GWGenerator(
+			sequence=sequences,
+			signal=signal,
+			neighbors=neighbors,
+			cell_states=cell_states,
+			read_depths=read_depths,
+			trimming=trimming, 
+			window=window, 
+			chroms=parameters['training_chroms'],
+			random_state=parameters['random_state']),
+		pin_memory=True, 
+		num_workers=8,
+		worker_init_fn=lambda x: numpy.random.seed(x),
+		batch_size=parameters['batch_size'])
+
+
+	X_valid = LocusGenerator(
+		sequence=sequence,
+		signal=signal,
+		loci_file=parameters['loci'],
+		neighbors=neighbors,
+		cell_states=cell_states,
+		read_depths=read_depths,
+		trimming=trimming, 
+		window=parameters['in_window'],
+		chroms=parameters['validation_chroms'],
+		random_state=0)
+
+	if parameters['bias_model'] is not None:
+		bias_model = torch.load(parameters['bias_model'], 
+			map_location='cpu').eval().cuda()
+	else: 
+		awdad
+
+
+	controller = CellStateController(n_inputs=cell_states.shape[-1], 
+		n_nodes=parameters['controller_n_nodes'], 
+		n_layers=parameters['controller_n_layers'], 
+		n_outputs=parameters['controller_n_outputs']
+	).cuda()
+
+	accessibility_model = DynamicBPNet(n_filters=parameters['n_filters'], 
+		n_layers=parameters['n_layers'], trimming=trimming, 
+		controller=controller
+	).cuda()
+
+	model = DragoNNFruit(bias_model, accessibility_model, 
+		parameters['name']).cuda()
+	optimizer = torch.optim.Adam(model.parameters(), 
+		lr=parameters['learning_rate'])
+
+	model.fit(X, X_valid, optimizer, 
+		n_validation_samples=parameters['n_validation_examples'], 
+		max_epochs=parameters['max_epochs'], 
+		validation_iter=parameters['validation_iter'], 
+		batch_size=parameters['batch_size']
+	)
