@@ -314,7 +314,7 @@ class DragoNNFruit(torch.nn.Module):
 		X_valid, y_valid, c_valid, r_valid = zip(*[validation_data[i]
 			for i in range(n_validation_samples)])
 		X_valid = torch.stack(X_valid).cuda()
-		y_valid = torch.stack(y_valid).cuda()
+		y_valid = torch.stack(y_valid).type(torch.float32).cuda()
 		c_valid = torch.stack(c_valid).cuda()
 		r_valid = torch.stack(r_valid).cuda()
 

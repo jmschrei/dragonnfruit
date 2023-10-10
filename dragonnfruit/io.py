@@ -6,8 +6,47 @@ import numpy
 import scipy
 import torch
 import pandas
+import pyfaidx
 
 from bpnetlite.io import one_hot_encode
+from joblib import Parallel, delayed
+
+def extract_fasta(filename, chroms, n_jobs=-1):
+	"""Extract and one-hot encode chromosomes from a FASTA file in parallel.
+
+	This function will take in a FASTA file and a set of chromosomes and, in
+	parallel, will one-hot encode the chromosomes and return a dictionary
+	with the extracted values.
+
+
+	Parameters
+	----------
+	filename: str
+		The name of a FASTA file.
+
+	chroms: list or tuple
+		A set of chromosomes to return one-hot encodings for.
+
+	n_jobs: int, optional
+		The number of jobs to process in parallel.
+
+
+
+	Returns
+	-------
+	ohes: dict
+		A dictionary where the keys are the chromosomes and the values are the
+		one-hot encodings.
+	"""
+
+	fa = pyfaidx.Fasta(filename)
+
+	f = delayed(one_hot_encode)
+	ohes = Parallel(n_jobs=n_jobs)(f(fa[chrom][:].seq.upper()) 
+		for chrom in chroms)
+
+	return {chrom: ohe for chrom, ohe in zip(chroms, ohes)}
+
 
 
 def _extract_example(self, chrom, mid, cell_idx, idx):
@@ -141,7 +180,6 @@ class LocusGenerator(torch.utils.data.Dataset):
 			loci.append(loci_)
 
 		self.loci = pandas.concat(loci).sort_index().reset_index(drop=True) # interleave
-		print("Loci: {}".format(self.loci.shape[0]))
 
 	def __len__(self):
 		return self.loci.shape[0]
@@ -153,7 +191,7 @@ class LocusGenerator(torch.utils.data.Dataset):
 		return _extract_example(self, chrom, mid, cell_idx, idx)
 
 	
-class GWGenerator(torch.utils.data.Dataset):
+class GenomewideGenerator(torch.utils.data.Dataset):
 	"""A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
 
 	This generator takes in a set of sequences and output signals 
@@ -197,7 +235,6 @@ class GWGenerator(torch.utils.data.Dataset):
 		self.cell_states = cell_states
 		self.read_depths = read_depths
 		self._lengths = numpy.array([seq.shape[0] for seq in self.sequence.values()])
-		print(self._lengths)
 
 	def __len__(self):
 		return sum(self._lengths)

@@ -21,12 +21,15 @@ from scipy import sparse
 from dragonnfruit.preprocessing import extract_fragments
 from dragonnfruit.preprocessing import preprocess_sparse_atac
 
+from dragonnfruit.io import extract_fasta
 from dragonnfruit.io import LocusGenerator
-from dragonnfruit.io import GWGenerator
+from dragonnfruit.io import GenomewideGenerator
 
 from dragonnfruit.models import CellStateController
 from dragonnfruit.models import DynamicBPNet
 from dragonnfruit.models import DragoNNFruit
+
+from tqdm import tqdm
 
 torch.backends.cudnn.benchmark = True
 
@@ -129,6 +132,7 @@ default_fit_parameters = {
 	'reverse_complement': True,
 	'max_epochs': 50,
 	'validation_iter': 100,
+	'n_validation_examples': 10000,
 	'lr': 0.0001,
 	'alpha': 10,
 	'beta': 0.5,
@@ -142,8 +146,10 @@ default_fit_parameters = {
 		'chr9', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 
 		'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX'],
 	'validation_chroms': ['chr8', 'chr10'],
+
 	'sequences': None,
 	'signals': None,
+	'loci': None,
 	'cell_states': None,
 	'neighbors': None,
 	'read_depths': None,
@@ -427,30 +433,29 @@ if args.cmd == 'fit':
 	else:
 		read_depths = numpy.load(parameters['read_depths'])
 
-	read_depths = read_depths[neighbors].sum(axis=0)
+	read_depths = read_depths[neighbors].sum(axis=1)
 	read_depths = numpy.log2(read_depths + 1)
 	read_depths = read_depths.reshape(-1, 1)
 
 	chroms = parameters['training_chroms'] + parameters['validation_chroms']
 
-	signal = load_data(parameters['signal'])
-	sequence = {}
-	for chrom in chroms:
-		sequence[chrom] = numpy.load("{}/{}.npy".format(parameters['sequences'], 
-			chrom))
+	signals = load_data(parameters['signals'])
+	sequences = extract_fasta(parameters['sequences'], chroms=chroms, n_jobs=-1)
+
+	trimming = (parameters['in_window'] - parameters['out_window']) // 2
 
 	#print("Done loading sc-data")
 	###
 
 	X = torch.utils.data.DataLoader(
-		GWGenerator(
+		GenomewideGenerator(
 			sequence=sequences,
-			signal=signal,
+			signal=signals,
 			neighbors=neighbors,
 			cell_states=cell_states,
 			read_depths=read_depths,
 			trimming=trimming, 
-			window=window, 
+			window=parameters['in_window'], 
 			chroms=parameters['training_chroms'],
 			random_state=parameters['random_state']),
 		pin_memory=True, 
@@ -460,8 +465,8 @@ if args.cmd == 'fit':
 
 
 	X_valid = LocusGenerator(
-		sequence=sequence,
-		signal=signal,
+		sequence=sequences,
+		signal=signals,
 		loci_file=parameters['loci'],
 		neighbors=neighbors,
 		cell_states=cell_states,
@@ -492,7 +497,7 @@ if args.cmd == 'fit':
 	model = DragoNNFruit(bias_model, accessibility_model, 
 		parameters['name']).cuda()
 	optimizer = torch.optim.Adam(model.parameters(), 
-		lr=parameters['learning_rate'])
+		lr=parameters['lr'])
 
 	model.fit(X, X_valid, optimizer, 
 		n_validation_samples=parameters['n_validation_examples'], 
