@@ -44,7 +44,6 @@ class ProfileWrapper(torch.nn.Module):
 def calculate_attributions(model, X, cell_states, n_shuffles=10, batch_size=1, 
 	verbose=True):
 	wrapper = ProfileWrapper(model.cuda())
-	ig = DeepLiftShap(wrapper)
 
 	reference = dinucleotide_shuffle(X, n_shuffles=n_shuffles).cuda()
 	reference = reference.type(X.dtype)
@@ -54,6 +53,8 @@ def calculate_attributions(model, X, cell_states, n_shuffles=10, batch_size=1,
 
 	attributions = []
 	for start in trange(0, len(cell_states), batch_size, disable=not verbose):
+		ig = DeepLiftShap(wrapper)
+
 		c_ = _cell_states[start:start+batch_size]
 		X_ = X.expand(len(c_), -1, -1)
 		
@@ -61,10 +62,10 @@ def calculate_attributions(model, X, cell_states, n_shuffles=10, batch_size=1,
 			additional_forward_args=(c_,), 
 			custom_attribution_func=hypothetical_attributions)
 
-		attr = (attr * X_).cpu()
+		attr = (attr * X_).cpu().detach()
 		attributions.append(attr)
 	
-	attributions = torch.cat(attributions).detach()
+	attributions = torch.cat(attributions)
 	return attributions
 
 def calculate_attributions_cross(model, X, cell_states, n_shuffles=10, 

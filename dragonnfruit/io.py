@@ -11,6 +11,55 @@ from bpnetlite.io import one_hot_encode
 
 
 def _extract_example(self, chrom, mid, cell_idx, idx):
+	"""An internal function for extracting a single example.
+
+	This function will extract an example from a given position in a given
+	cell and handle adding jitter, creating the dynamic pseudobulk, and
+	potentially reverse complementing the sequence. It will return the
+	one-hot encoded sequence, signal, cell representation, and read depth
+	of that cell.
+
+	Note that this function returns a *single* example and that the data
+	generators below handle the creation of batches by repeatedly calling this
+	function and concatenating the examples.
+
+
+	Parameters
+	----------
+	self: torch.utils.data.Dataset
+		This is one of the data generators defined below. Although they may
+		differ in how loci and cells are selected, they share the same logic
+		for how to extract the inputs given a cell and location.
+
+	chrom: str
+		The chromosome name to extract from.
+
+	mid: int
+		The middle position to extract a window around.
+
+	cell_idx: int
+		The integer index of the cell to operate on.
+
+	idx: int
+		The index being generated. Necessary when reverse complementing every
+		even sequence.
+
+
+	Returns
+	-------
+	X: torch.Tensor, shape=(4, 2114)
+		The one-hot encoded sequence
+
+	y: torch.Tensor, shape=(1000,)
+		The signal to be predicted
+
+	c: torch.Tensor, shape=(50,)
+		The cell representation to be extracted.
+
+	r: torch.Tensor, shape=(1,)
+		The read depth of that particular cell.
+	"""
+
 	start, end = mid - self.window // 2, mid + self.window // 2
 	neighbs = self.neighbors[cell_idx]
 
@@ -161,107 +210,3 @@ class GWGenerator(torch.utils.data.Dataset):
 		mid = numpy.random.randint(10000, self._lengths[c_idx]-10000)
 		cell_idx = numpy.random.randint(self.cell_states.shape[0])
 		return _extract_example(self, chrom, mid, cell_idx, idx)
-
-
-class GWBGenerator(torch.utils.data.Dataset):
-	"""A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
-
-	This generator takes in a set of sequences and output signals 
-	and will return a single element with random jitter and reverse-complement 
-	augmentation applied. Because the data is single-cell where the output
-	signals differ across cells, each returned element is a random locus
-	in a random cell. 
-
-	A conceptual difference between this DataGenerator and the one implemented
-	in bpnet-lite is that the bpnet-lite one assumes that you can extract all
-	loci into an array. Here, because there are hundreds of thousands of peaks
-	and potentially thousands of cells, it is actually more efficient to 
-
-	Parameters
-	----------
-	sequences: dict of torch.tensors, shape=(n, 4), dtype=torch.float32
-		A dictionary of the nucleotide sequences to use.
-
-	signals: dict of torch.tensors, shape=(n, n_cells), dtype=torch.float32
-		A dictionary of the cell signals
-
-	loci: str or pandas.DataFrame
-		A set of loci to use.
-	
-	cell_states: 
-	"""
-
-	def __init__(self, sequence, signal, neighbors, cell_states, 
-		read_depths, trimming, window, chroms, batch_size=1024, 
-		cells_per_loci=1, reverse_complement=True, random_state=None):
-		self.trimming = trimming
-		self.window = window
-		self.chroms = chroms
-		self.reverse_complement = reverse_complement
-		self.batch_size = batch_size
-		self.cells_per_loci = cells_per_loci
-		self.random_state = numpy.random.RandomState(random_state)
-
-		print(signal['chr21'].dtype, sequence['chr21'].dtype)
-
-		self.signal = {chrom: signal[chrom] for chrom in chroms}
-		self.sequence = {chrom: sequence[chrom] for chrom in chroms}
-		self.neighbors = neighbors
-		self.cell_states = cell_states
-		self.read_depths = read_depths
-		self._lengths = numpy.array([seq.shape[0] for seq in self.sequence.values()])
-		self._probs = self._lengths / self._lengths.sum()
-
-		print(self._lengths)
-
-	def __len__(self):
-		return sum(self._lengths)
-
-	def __getitem__(self, idx):
-		tic = time.time()
-		X = numpy.empty((self.batch_size, 4, self.window), dtype=numpy.int8)
-		y = numpy.empty((self.batch_size, self.window - self.trimming*2), dtype=numpy.float32)
-		c = numpy.empty((self.batch_size, self.cell_states.shape[1]), dtype=numpy.float32)
-		r = numpy.empty((self.batch_size, 1), dtype=numpy.float32)
-
-		cell_idxs = self.random_state.randint(self.cell_states.shape[0], size=self.batch_size)
-		chrom_idxs = self.random_state.choice(len(self._lengths), p=self._probs, size=self.batch_size) 
-
-		nc = self.cells_per_loci
-		a = time.time() - tic
-		b, d, e = 0, 0, 0
-
-		for i, (cell_idx, chrom_idx) in enumerate(zip(cell_idxs, chrom_idxs)):
-			tic = time.time()
-			if i % nc == 0:
-				chrom = self.chroms[chrom_idx]
-
-				mid = self.random_state.randint(10000, self._lengths[chrom_idx]-10000)
-				start, end = mid - self.window // 2, mid + self.window // 2
-
-				lidx = (i // nc) * nc
-				X[lidx:lidx+nc] = self.sequence[chrom][start:end].T
-				y_ = self.signal[chrom][:, start+self.trimming:end-self.trimming].tocsr()
-				b += time.time() - tic
-
-			tic = time.time()
-			neighbs = self.neighbors[cell_idx]
-			y[i] = numpy.array(y_[neighbs].sum(axis=0))[0]
-			d += time.time() - tic
-
-			tic = time.time()
-			c[i] = self.cell_states[cell_idx]
-			r[i] = self.read_depths[cell_idx]
-			e += time.time() - tic
-
-			if self.reverse_complement and idx % 2 == 0:
-				X[i] = X[i][::-1][:, ::-1].copy()
-				y[i] = y[i][::-1].copy()
-
-		tic = time.time()
-		X = torch.from_numpy(X.astype('float32'))
-		y = torch.from_numpy(y)
-		c = torch.from_numpy(c)
-		r = torch.from_numpy(r)
-		#print(idx, a, b, d, e, time.time() - tic)
-		return X, y, c, r

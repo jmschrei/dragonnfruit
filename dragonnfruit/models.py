@@ -173,10 +173,8 @@ class DragoNNFruit(torch.nn.Module):
 			a normalized value.
 		"""
 
-
-		y_acc = self.accessibility(X, cell_states)
-		y_bias_profile, y_bias_counts = self.bias(X)
-		return y_acc + read_depths + y_bias_profile[:,0] #+ y_bias_counts
+		return read_depths + self.bias(X)[0][:, 0] + self.accessibility(X,
+			cell_states)
 		
 	@torch.no_grad()
 	def predict(self, X, cell_states, read_depths, batch_size=16, 
