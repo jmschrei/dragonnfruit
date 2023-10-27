@@ -258,6 +258,7 @@ def _extract_fragments(filename, chrom_sizes, include_cells=None,
 
 	_cell_names = []
 	_cell_name_mapping = {}
+	n_cells = 0
 
 	if include_cells is not None:
 		for idx, name in enumerate(include_cells):
