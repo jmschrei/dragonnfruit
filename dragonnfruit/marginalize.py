@@ -83,12 +83,12 @@ def marginalize(model, motif, X, cell_states, read_depths=None, spacing=24,
 	motif = motif if isinstance(motif, list) else [motif]
 	motif_ohes = [torch.from_numpy(one_hot_encode(m, alphabet=alphabet)) 
 		for m in motif]
-	
+
 	start = X.shape[-1] // 2 - len(motif) // 2
 	for motif_ohe in motif_ohes:
-		for i in range(len(motif_ohe)):
-			if motif_ohe[i].sum() > 0:
-				X_perturb[:, :, start+i] = motif_ohe[i]
+		for i in range(motif_ohe.shape[1]):
+			if motif_ohe[:, i].sum() > 0:
+				X_perturb[:, :, start+i] = motif_ohe[:, i]
 		
 		start += len(motif_ohe) + spacing
 	

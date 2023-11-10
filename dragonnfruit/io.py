@@ -102,7 +102,7 @@ def _extract_example(self, chrom, mid, cell_idx, idx):
 	start, end = mid - self.window // 2, mid + self.window // 2
 	neighbs = self.neighbors[cell_idx]
 
-	X = self.sequence[chrom][start:end].T.astype('float32')
+	X = self.sequence[chrom][:, start:end]
 	y = self.signal[chrom][:, start+self.trimming:end-self.trimming]
 	y = numpy.array(y[neighbs].sum(axis=0))[0]
 
@@ -220,12 +220,11 @@ class GenomewideGenerator(torch.utils.data.Dataset):
 	"""
 
 	def __init__(self, sequence, signal, neighbors, cell_states, 
-		read_depths, trimming, window, chroms, cells_per_loci=1, 
+		read_depths, trimming, window, chroms, 
 		reverse_complement=True, random_state=None):
 		self.trimming = trimming
 		self.window = window
 		self.chroms = chroms
-		self.cells_per_loci = cells_per_loci
 		self.reverse_complement = reverse_complement
 		self.random_state = numpy.random.RandomState(random_state)
 
@@ -234,14 +233,14 @@ class GenomewideGenerator(torch.utils.data.Dataset):
 		self.neighbors = neighbors
 		self.cell_states = cell_states
 		self.read_depths = read_depths
-		self._lengths = numpy.array([seq.shape[0] for seq in self.sequence.values()])
+		self._lengths = numpy.array([seq.shape[1] for seq in self.sequence.values()])
+		self._chrom_probs = self._lengths / self._lengths.sum()
 
 	def __len__(self):
 		return sum(self._lengths)
 
 	def __getitem__(self, idx):
-		c_idx = numpy.random.choice(len(self._lengths), 
-			p=self._lengths / self._lengths.sum())
+		c_idx = numpy.random.choice(len(self._lengths), p=self._chrom_probs)
 		chrom = self.chroms[c_idx]
 
 		mid = numpy.random.randint(10000, self._lengths[c_idx]-10000)

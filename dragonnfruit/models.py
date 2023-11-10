@@ -295,8 +295,9 @@ class DragoNNFruit(torch.nn.Module):
 
 		with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
 			y_hat = self(X, cell_states, read_depths)
-			y_hat_ = torch.nn.functional.log_softmax(y_hat.flatten(), dim=-1)
-			loss = MNLLLoss(y_hat_, y.flatten())
+
+		y_hat_ = torch.nn.functional.log_softmax(y_hat.flatten(), dim=-1)
+		loss = MNLLLoss(y_hat_, y.flatten())
 
 		loss_ = loss.item()
 		loss = loss.backward()
@@ -313,8 +314,8 @@ class DragoNNFruit(torch.nn.Module):
 
 		X_valid, y_valid, c_valid, r_valid = zip(*[validation_data[i]
 			for i in range(n_validation_samples)])
-		X_valid = torch.stack(X_valid).cuda()
-		y_valid = torch.stack(y_valid).type(torch.float32).cuda()
+		X_valid = torch.stack(X_valid).cuda().type(torch.float32)
+		y_valid = torch.stack(y_valid).cuda().type(torch.float32)
 		c_valid = torch.stack(c_valid).cuda()
 		r_valid = torch.stack(r_valid).cuda()
 
@@ -322,7 +323,7 @@ class DragoNNFruit(torch.nn.Module):
 		self.logger.start()
 		for epoch in range(max_epochs):
 			for i, (X, y, cell_states, read_depths) in enumerate(training_data):
-				X = X.cuda()
+				X = X.cuda().type(torch.float32)
 				y = y.cuda()
 				cell_states = cell_states.cuda()
 				read_depths = read_depths.cuda()
