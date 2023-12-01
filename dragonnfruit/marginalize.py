@@ -10,7 +10,7 @@ from bpnetlite.io import one_hot_encode
 
 
 def marginalize(model, motif, X, cell_states, read_depths=None, spacing=24,
-	verbose=False):
+	center=False, verbose=False):
 	"""Perform in-silico marginalization on background sequences.
 
 	This method will perform in-silico marginalization on the provided
@@ -55,6 +55,10 @@ def marginalize(model, motif, X, cell_states, read_depths=None, spacing=24,
 	spacing: int, optional
 		If providing multiple motifs, specify the spacing.
 
+	center: bool, optional
+		Whether to center the inserted motifs or to always begin in the exact
+		middle and continue towards the right. Default is False.
+
 	verbose: bool, optional
 		Whether to print a progress bar while iterating over loci. Default is 
 		False.
@@ -84,7 +88,13 @@ def marginalize(model, motif, X, cell_states, read_depths=None, spacing=24,
 	motif_ohes = [torch.from_numpy(one_hot_encode(m, alphabet=alphabet)) 
 		for m in motif]
 
-	start = X.shape[-1] // 2 - len(motif) // 2
+
+	start = X.shape[-1] // 2
+	if center:
+		n = sum(m.shape[-1] for m in motif_ohes)
+		n += spacing * (len(motif_ohes) - 1)
+		start -= n // 2
+
 	for motif_ohe in motif_ohes:
 		for i in range(motif_ohe.shape[1]):
 			if motif_ohe[:, i].sum() > 0:
@@ -102,7 +112,7 @@ def marginalize(model, motif, X, cell_states, read_depths=None, spacing=24,
 
 
 def marginalize_cross(model, motif, X, cell_states, read_depths=None, 
-	spacing=24, verbose=False):
+	spacing=24, center=False, verbose=False):
 	"""Perform in-silico marginalization on background sequences across states.
 
 	This method will perform in-silico marginalization on the provided
@@ -141,6 +151,10 @@ def marginalize_cross(model, motif, X, cell_states, read_depths=None,
 		using only the accessibility model, do not pass in anything. Default is
 		None.
 
+	center: bool, optional
+		Whether to center the inserted motifs or to always begin in the exact
+		middle and continue towards the right. Default is False.
+
 	spacing: int, optional
 		If providing multiple motifs, specify the spacing.
 
@@ -171,7 +185,9 @@ def marginalize_cross(model, motif, X, cell_states, read_depths=None,
 			read_depth = None
 
 		y_before, y_after = marginalize(model=model, motif=motif, X=X, 
-			cell_states=cell_state, read_depths=read_depth, spacing=spacing)
+			cell_states=cell_state, read_depths=read_depth, spacing=spacing,
+			center=center)
+		
 		y_befores.append(y_before)
 		y_afters.append(y_after)
 

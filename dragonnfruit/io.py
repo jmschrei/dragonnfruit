@@ -246,3 +246,67 @@ class GenomewideGenerator(torch.utils.data.Dataset):
 		mid = numpy.random.randint(10000, self._lengths[c_idx]-10000)
 		cell_idx = numpy.random.randint(self.cell_states.shape[0])
 		return _extract_example(self, chrom, mid, cell_idx, idx)
+
+
+class GenomewideWeightedGenerator(torch.utils.data.Dataset):
+    """A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
+
+
+    Parameters
+    ----------
+    sequences: dict of torch.tensors, shape=(n, 4), dtype=torch.float32
+        A dictionary of the nucleotide sequences to use.
+
+    signals: dict of torch.tensors, shape=(n, n_cells), dtype=torch.float32
+        A dictionary of the cell signals
+
+    loci: str or pandas.DataFrame
+        A set of loci to use.
+
+    cell_states: 
+    """
+
+    def __init__(self, sequence, signal, neighbors, cell_states, 
+        read_depths, trimming, window, chroms, 
+        reverse_complement=True, random_state=None):
+        self.trimming = trimming
+        self.window = window
+        self.chroms = chroms
+        self.reverse_complement = reverse_complement
+        self.random_state = numpy.random.RandomState(random_state)
+
+        self.signal = {chrom: signal[chrom] for chrom in chroms}
+        self.sequence = {chrom: sequence[chrom] for chrom in chroms}
+        self.neighbors = neighbors
+        self.cell_states = cell_states
+        self.read_depths = read_depths
+
+        self.weights = {}
+        self._chrom_probs = numpy.zeros(len(chroms))
+        for i, chrom in enumerate(chroms):
+            X = self.signal[chrom]
+            X = numpy.diff(X.indptr)
+            X = X[:X.shape[0]//1000*1000].reshape(-1, 1000).sum(axis=1)
+            X = numpy.log(X+1)+1
+            X[:10000] = 0
+            X[-10000:] = 0
+            
+            self.weights[chrom] = X / X.sum()
+            self._chrom_probs[i] = X.sum()
+            
+        self._chrom_probs /= self._chrom_probs.sum()
+        
+    def __len__(self):
+        return 999999999
+
+    def __getitem__(self, idx):
+        chrom_idx = numpy.random.choice(len(self._chrom_probs),
+        	p=self._chrom_probs)
+        chrom = self.chroms[chrom_idx]
+
+        w = self.weights[chrom]
+        mid = numpy.random.choice(len(w), p=w) * 1000
+        mid += numpy.random.randint(1000)
+        
+        cell_idx = numpy.random.randint(self.cell_states.shape[0])
+        return _extract_example(self, chrom, mid, cell_idx, idx)
