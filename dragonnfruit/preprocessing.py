@@ -4,6 +4,7 @@
 import os
 import gzip
 import scipy
+import numba
 import numpy
 import pandas
 import pyBigWig
@@ -694,6 +695,53 @@ def preprocess_sparse_atac(X_cscs, peaks, chroms, n_components=50,
 	return peak_counts, X_pca, neighbors
 
 
+@numba.njit
+def _collapse_consecutive_values(X):
+	# Length.
+	n = X.shape[0]
+
+	# Create idx array with enough space to store all possible indices
+	# in case there are no consecutive values in the input that are
+	# the same.
+	idx = np.empty(n + 1, dtype=np.uint32)
+
+	# First index position will always be zero.
+	idx[0] = 0
+	# Next index postion to fill in in idx.
+	j = 1
+
+	# Loop over the whole input array and store indices for only those
+	# positions for which the previous value was different.
+	for i in numba.prange(1, n):
+		if X[i - 1] == X[i]:
+			continue
+
+		# Current value is different from previous value, so store the index
+		# position of the current index i in idx[j].
+		idx[j] = i
+
+		# Increase next index position to fill in in idx.
+		j += 1
+
+	# Store length of input as last value. Needed to calculate the number of times
+	# the last consecutive value gets repeated.
+	idx[j] = n
+
+	# Get all consecutive different values from the input.
+	values = X[idx[:j]].astype(np.float32)
+
+	# Calculate the number of times each value in values gets consecutively
+	# repeated in the input.
+	lengths = idx[1 : j + 1] - idx[:j]
+
+	# Restrict indices array to same number of element than the values and lentgths
+	# arrays.
+	idx = idx[:j].copy()
+
+	# To reconstruct the original input: X == values.repeat(lenghts)
+	return idx, values, lengths
+
+
 def create_pseudobulks(X_index, row_index, output_filename, chroms=None):
 	""" do not use or your computer will die."""
 
@@ -701,17 +749,29 @@ def create_pseudobulks(X_index, row_index, output_filename, chroms=None):
 	header = list(self.chrom_sizes.items())
 
 	# Create the bigwig to save a pseudobulk
-	bw = pyBigWig.open(output_filename, "w")
-	bw.addHeader(header, maxZooms=0)
-	for chrom in chroms:
-		X_csc = reads[chrom]
+	with pyBigWig.open(output_filename, "w") as bw:
+		bw.addHeader(header, maxZooms=0)
+		for chrom in chroms:
+			X_csc = reads[chrom]
 
-		# Sum across cells to produce the pseudobulk
-		X_bulk = X_csc.astype('float32').sum(axis=0)
-		X_bulk = numpy.array(X_bulk)[0]
+			# Sum across cells to produce the pseudobulk
+			X_bulk = X_csc.astype('float32').sum(axis=0)
+			X_bulk = numpy.array(X_bulk)[0]
 
-		# Add to the bigwig
-		bw.addEntries(chrom, 0, values=X_bulk, step=1, span=1)
-		del X_csc
+			idx, values, lengths = _collapse_consecutive_values(X_bulk)
+			non_zero_idx = np.flatnonzero(values)
 
-	bw.close()
+			if non_zero_idx.shape[0] == 0:
+				# Skip chromosomes with no depth > 0.
+				continue
+
+			# Select only consecutive different values and calculate start and end coordinates
+			# (in BED format) for each of those ranges.
+			chroms = np.repeat(chrom, len(non_zero_idx))
+			starts = idx[non_zero_idx]
+			ends = idx[non_zero_idx] + lengths[non_zero_idx]
+			values = values[non_zero_idx]
+
+			# Add to the bigwig.
+			bw.addEntries(chroms=chroms, starts=starts, ends=ends, values=values)
+			del X_csc
