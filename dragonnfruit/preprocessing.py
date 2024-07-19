@@ -262,6 +262,7 @@ def _extract_fragments(filename, chrom_sizes, include_cells=None,
 
 	if include_cells is not None:
 		for idx, name in enumerate(include_cells):
+			name = name.strip("\n\t")
 			name_rc = reverse_complement(name)
 
 			name = cell_name_prefix + name
@@ -377,7 +378,7 @@ def _extract_fragments(filename, chrom_sizes, include_cells=None,
 
 def extract_fragments(fragments, chrom_sizes, chroms=None, include_cells=None, 
 	exclude_cells=None, cell_name_prefixes=None, max_fragment_length=1000, 
-	start_offset=4, end_offset=-5, n_jobs=-1, verbose=True):
+	start_offset=4, end_offset=-5, n_jobs=1, verbose=True):
 	"""Process multiple fragment files into a unified set of sparse matrices.
 
 	This function operates on several fragment files, extracting fragments
@@ -469,7 +470,7 @@ def extract_fragments(fragments, chrom_sizes, chroms=None, include_cells=None,
 		_include_cells = []
 		for _include in include_cells:
 			if isinstance(_include, str):
-				_include = numpy.loadtxt(_include, dtype=str)
+				_include = numpy.loadtxt(_include, dtype=str, comments=None)
 
 			_include_cells.append(_include)
 
@@ -481,7 +482,8 @@ def extract_fragments(fragments, chrom_sizes, chroms=None, include_cells=None,
 		_exclude_cells = []
 		for _exclude in exclude_cells:
 			if isinstance(_exclude, str):
-				_exclude = numpy.loadtxt(_exclude, dtype=str).tolist()
+				_exclude = numpy.loadtxt(_exclude, dtype=str, comments=None)
+				_exclude = _exclude.tolist()
 
 			_exclude_cells.append(set(_exclude))
 
@@ -610,6 +612,7 @@ def extract_cellxpeak(X, peaks, chroms=None, verbose=False):
 	data, indices, indptr = [], [], [0]
 	for i, (chrom, start, end) in tqdm(peaks.iterrows(), disable=d):
 		if chrom not in chroms:
+			print(chrom)
 			continue
 
 		peak = X[chrom][:, start:end+1]
@@ -628,8 +631,76 @@ def extract_cellxpeak(X, peaks, chroms=None, verbose=False):
 	return peak_counts
 
 
-def preprocess_sparse_atac(X_cscs, peaks, chroms, n_components=50, 
-	n_neighbors=500, n_jobs=-1, verbose=True):
+def extract_cellxtile(X, tile_size, chroms=None, verbose=False):
+    """Take mapped reads and return a cell x peak matrix.
+
+    This function will take in a dictionary of sparse matrices, e.g., the bp
+    mapped reads, and a set of peak coordinates, and return an AnnData object
+    that is the number of reads mapped at each position.
+
+
+    Parameters
+    ----------
+    X: dict
+        A dictionary of scipy sparse matrices where each key is a chromosome
+        with the same name as those in `peaks` and each value is a scipy
+        sparse matrix where the rows are cells and the columns are positions
+        in the genome.
+
+    tile_size: int
+        The number of basepairs in each tile.
+
+    chroms: list, tuple, or None, optional
+        An iterable of chroms to restrict the analysis to or None. If None,
+        uses peaks from all chromosomes. Default is None.
+
+    verbose: bool, optional
+        Whether to display progress as peaks are being extracted.
+
+
+    Returns
+    -------
+    y: scipy.sparse.csr_matrix
+        An AnnData object containing reads for each cell at each peak.
+    """
+
+    if chroms is None:
+        chroms = set(X.keys())
+    else:
+        chroms = set(chroms)
+
+    n = X[list(chroms)[0]].shape[0]
+    d = not verbose
+    n_tiles = 0
+
+    data, indices, indptr = [], [], [[0]]
+    for chrom in tqdm(chroms, disable=d):
+        n_tiles_ = X[chrom].shape[1] // tile_size
+
+        data.append(X[chrom].data)
+        indices.append(X[chrom].indices)
+
+        x_ = numpy.diff(X[chrom].indptr)
+        indptr_ = x_[:n_tiles_*tile_size]
+        indptr_ = indptr_.reshape(n_tiles_, -1).sum(axis=-1)
+        indptr_r = x_[n_tiles_*tile_size:].sum()
+        indptr_r = numpy.array([indptr_r])        
+        indptr.append(indptr_)
+        indptr.append(indptr_r)
+
+        n_tiles += n_tiles_ + 1
+
+    data = numpy.concatenate(data)
+    indices = numpy.concatenate(indices)
+    indptr = numpy.cumsum(numpy.concatenate(indptr))
+    
+    tile_counts = scipy.sparse.csc_matrix((data, indices, indptr), shape=(n, 
+        n_tiles), dtype='int8')
+    return tile_counts
+
+
+def preprocess_sparse_atac(X_cscs, peaks=None, tile_size=None, chroms=None, 
+	n_components=50, n_neighbors=500, n_jobs=-1, verbose=True):
 	"""Preprocess the sparse fragments into all the needed files.
 
 	Given a matrix of representations `X`, run TF-IDF to reweight positions
@@ -645,11 +716,16 @@ def preprocess_sparse_atac(X_cscs, peaks, chroms, n_components=50,
 		csc-formatted sparse matrices with the rows being cells across all
 		fragment files and the columns being basepairs in the chromosome.
 
-	peaks: pandas.DataFrame or str
+	peaks: pandas.DataFrame or str or None
 		Either a pandas DataFrame in bed format where the first three columns
 		are `chrom`, `start`, `end` (additional columns will be ignored) or
 		a string. A string is assumed to be a filename for a bed file and read
-		assuming that format.
+		assuming that format. If None, will use a tile-based representation
+		instead. Default is None.
+
+	tile_size: int or None
+		The number of basepairs in each tile. Must be specified if `peaks`
+		is None. Default is None.
 
 	chroms: list, tuple, or None, optional
 		An iterable of chroms to restrict the analysis to or None. If None,
@@ -683,15 +759,21 @@ def preprocess_sparse_atac(X_cscs, peaks, chroms, n_components=50,
 		An integer list of neighbors for each cell.
 	"""
 
-	peak_counts = extract_cellxpeak(X_cscs, peaks, chroms=chroms, 
-		verbose=verbose)
+	if peaks is not None:
+		counts = extract_cellxpeak(X_cscs, peaks, chroms=chroms, 
+			verbose=verbose)
+	elif peaks is None and tile_size is not None:
+		counts = extract_cellxtile(X_cscs, tile_size, chroms=chroms,
+			verbose=verbose)
+	else:
+		raise ValueError("Must specify one of `peaks` or `tile_size`.")
 
-	X_tfidf = TfidfTransformer().fit_transform(peak_counts)
+	X_tfidf = TfidfTransformer().fit_transform(counts)
 	X_pca = TruncatedSVD(n_components).fit_transform(X_tfidf)
 
 	nn = NearestNeighbors(n_neighbors=n_neighbors, n_jobs=-1)
 	neighbors = nn.fit(X_pca).kneighbors(X_pca)[1]
-	return peak_counts, X_pca, neighbors
+	return counts, X_pca, neighbors
 
 
 def create_pseudobulks(X_index, row_index, output_filename, chroms=None):

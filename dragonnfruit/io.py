@@ -8,8 +8,9 @@ import torch
 import pandas
 import pyfaidx
 
-from bpnetlite.io import one_hot_encode
+from tangermeme.utils import one_hot_encode
 from joblib import Parallel, delayed
+
 
 def extract_fasta(filename, chroms, n_jobs=-1):
 	"""Extract and one-hot encode chromosomes from a FASTA file in parallel.
@@ -46,7 +47,6 @@ def extract_fasta(filename, chroms, n_jobs=-1):
 		for chrom in chroms)
 
 	return {chrom: ohe for chrom, ohe in zip(chroms, ohes)}
-
 
 
 def _extract_example(self, chrom, mid, cell_idx, idx):
@@ -121,35 +121,79 @@ def _extract_example(self, chrom, mid, cell_idx, idx):
 
 
 class LocusGenerator(torch.utils.data.Dataset):
-	"""A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
+	"""A data generator that samples across a fixed set of loci.
 
-	This generator takes in a set of sequences and output signals 
-	and will return a single element with random jitter and reverse-complement 
-	augmentation applied. Because the data is single-cell where the output
-	signals differ across cells, each returned element is a random locus
-	in a random cell. 
+	This generator takes in genome-wide sequence and signal and a set of loci,
+	randomly samples a locus from the loci, and extracts the signal at those
+	coordinates. This is different from the data sampler in bpnet-lite because
+	that sampler could extract a fixed set of loci and keep them in memory.
+	Here, because of the cell axis, it is actually more feasible to keep
+	genome-wide signal in memory and sample from it, building dynamic
+	pseudobulks on the fly.
 
-	A conceptual difference between this DataGenerator and the one implemented
-	in bpnet-lite is that the bpnet-lite one assumes that you can extract all
-	loci into an array. Here, because there are hundreds of thousands of peaks
-	and potentially thousands of cells, it is actually more efficient to 
 
 	Parameters
 	----------
 	sequences: dict of torch.tensors, shape=(n, 4), dtype=torch.float32
-		A dictionary of the nucleotide sequences to use.
+		A dictionary of the nucleotide sequences to use. Generally, `n` is the
+		size of a chromosome because the entire genome is being loaded into
+		memory.
 
-	signals: dict of torch.tensors, shape=(n, n_cells), dtype=torch.float32
-		A dictionary of the cell signals
+	signals: dict of scipy.sparse.csc_matrix, shape=(n, n_cells)
+		A dictionary of the cell signals, where `n` is generally the size of
+		a chromosome, `n_cells` is the number of cells being modelled, and
+		the underlying data is a sparse matrix of counts.
 
-	loci: str or pandas.DataFrame
-		A set of loci to use.
+	loci: list of strs
+		A list of filenames for files that have bed-formatted coordinates.
+		Each file should essentially be a set of coordinates to sample. These
+		coordinates are shuffled and interleaved for sampling.
+
+	neighbors: torch.tensor, shape=(n_cells, n_neighbors)
+		A tensor of integers where each row is a cell, column i corresponds to
+		the i-th nearest neighbor, and the value is the integer index of the
+		cell that is that neighbor.
 	
-	cell_states: 
+	cell_states: torch.tensor, shape=(n_cells, n_dims)
+		A tensor of representations for each cell.
+
+	read_depths: torch.tensor, shape=(n_cells, 1)
+		A tensor of read depths for each cell. Rather than being the sum of
+		counts across the cell, this is usually log2(x+1) of that count, but
+		can be whatever the user wants.
+
+	chroms: list of str
+		A list of the chromosomes to sample from. All chromosomes in the loci
+		files that are not in this list will be filtered out.
+
+	trimming: int, optional
+		The number of bp to trim off each side of the input window to get the
+		output window. For instance, if the input window is 2114bp and trimming
+		is 557, the output window will be 1000bp. Default is 557.
+
+	window: int, optional
+		The size of the input window to extract. Default is 2114.
+
+	n_cells_per_locus: int, optional
+		The number of cells to sample for each sampled locus. If this number is
+		1, cells and loci will be uniformly randomly sampled. If this number is
+		above 1, multiple examples in a row will come from the same locus but
+		different cells. Default is 1.
+
+	reverse_complement: bool, optional
+		Whether to reverse complement half of the examples. Default is True.
+
+	max_jitter: int, optional
+		Random uniform values to add to the sampled loci. Sampled values will
+		range from -max_jitter to max_jitter. Default is 128.
+
+	random_state: int, optional
+		A random seed to use to make the sampling process deterministic. If
+		None, process is not deterministic. Default is None.
 	"""
 
-	def __init__(self, sequence, signal, loci_file, neighbors, cell_states, 
-		read_depths, trimming, window, chroms, n_cells_per_locus=1, 
+	def __init__(self, sequence, signal, loci, neighbors, cell_states, 
+		read_depths, chroms, trimming=557, window=2114, n_cells_per_locus=1, 
 		reverse_complement=True, max_jitter=128, random_state=None):
 		self.trimming = trimming
 		self.window = window
@@ -165,21 +209,21 @@ class LocusGenerator(torch.utils.data.Dataset):
 		self.read_depths = read_depths
 		self.n_cells_per_locus = n_cells_per_locus
 
-		if not isinstance(loci_file, list):
-			loci_file = [loci_file]
+		if not isinstance(loci, list):
+			loci = [loci]
 
-		loci = []
+		_loci = []
 		names = ['chrom', 'start', 'end']
-		for filename in loci_file:
+		for filename in loci:
 			loci_ = pandas.read_csv(filename, sep='\t', usecols=[0, 1, 2], 
 				header=None, index_col=False, names=names)
 			loci_['mid'] = (loci_['end'] - loci_['start']) // 2 + loci_['start']
 			loci_ = loci_[numpy.isin(loci_['chrom'], chroms)]
 			loci_ = loci_.sample(frac=1, random_state=self.random_state)
 			loci_ = loci_.reset_index(drop=True)
-			loci.append(loci_)
+			_loci.append(loci_)
 
-		self.loci = pandas.concat(loci).sort_index().reset_index(drop=True) # interleave
+		self.loci = pandas.concat(_loci).sort_index().reset_index(drop=True)
 
 	def __len__(self):
 		return self.loci.shape[0]
@@ -192,35 +236,72 @@ class LocusGenerator(torch.utils.data.Dataset):
 
 	
 class GenomewideGenerator(torch.utils.data.Dataset):
-	"""A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
+	"""A data generator that samples across the entire genome.
 
-	This generator takes in a set of sequences and output signals 
-	and will return a single element with random jitter and reverse-complement 
-	augmentation applied. Because the data is single-cell where the output
-	signals differ across cells, each returned element is a random locus
-	in a random cell. 
+	This general does not sample from a fixed set of loci but will, rather,
+	sample uniformly across the entire genome. So, it is not necessary to
+	pass in a set of peaks or even perform peak calling on signal from
+	single-cell data to use this generator.
 
-	A conceptual difference between this DataGenerator and the one implemented
-	in bpnet-lite is that the bpnet-lite one assumes that you can extract all
-	loci into an array. Here, because there are hundreds of thousands of peaks
-	and potentially thousands of cells, it is actually more efficient to 
 
 	Parameters
 	----------
 	sequences: dict of torch.tensors, shape=(n, 4), dtype=torch.float32
-		A dictionary of the nucleotide sequences to use.
+		A dictionary of the nucleotide sequences to use. Generally, `n` is the
+		size of a chromosome because the entire genome is being loaded into
+		memory.
 
-	signals: dict of torch.tensors, shape=(n, n_cells), dtype=torch.float32
-		A dictionary of the cell signals
+	signals: dict of scipy.sparse.csc_matrix, shape=(n, n_cells)
+		A dictionary of the cell signals, where `n` is generally the size of
+		a chromosome, `n_cells` is the number of cells being modelled, and
+		the underlying data is a sparse matrix of counts.
 
-	loci: str or pandas.DataFrame
-		A set of loci to use.
+	neighbors: torch.tensor, shape=(n_cells, n_neighbors)
+		A tensor of integers where each row is a cell, column i corresponds to
+		the i-th nearest neighbor, and the value is the integer index of the
+		cell that is that neighbor.
 	
-	cell_states: 
+	cell_states: torch.tensor, shape=(n_cells, n_dims)
+		A tensor of representations for each cell.
+
+	read_depths: torch.tensor, shape=(n_cells, 1)
+		A tensor of read depths for each cell. Rather than being the sum of
+		counts across the cell, this is usually log2(x+1) of that count, but
+		can be whatever the user wants.
+
+	chroms: list of str
+		A list of the chromosomes to sample from. All chromosomes in the loci
+		files that are not in this list will be filtered out.
+
+	cell_weights: torch.tensor or None, optional
+		A weight to put on the cell for the purpose of sampling. This vector
+		will be rescaled into probabilities and so does not need to sum to 1.
+		If None, uniformly sample cells. Default is None.
+
+	trimming: int, optional
+		The number of bp to trim off each side of the input window to get the
+		output window. For instance, if the input window is 2114bp and trimming
+		is 557, the output window will be 1000bp. Default is 557.
+
+	window: int, optional
+		The size of the input window to extract. Default is 2114.
+
+	n_cells_per_locus: int, optional
+		The number of cells to sample for each sampled locus. If this number is
+		1, cells and loci will be uniformly randomly sampled. If this number is
+		above 1, multiple examples in a row will come from the same locus but
+		different cells. Default is 1.
+
+	reverse_complement: bool, optional
+		Whether to reverse complement half of the examples. Default is True.
+
+	random_state: int, optional
+		A random seed to use to make the sampling process deterministic. If
+		None, process is not deterministic. Default is None.
 	"""
 
 	def __init__(self, sequence, signal, neighbors, cell_states, 
-		read_depths, trimming, window, chroms, 
+		read_depths, chroms, cell_weights=None, trimming=557, window=2114,  
 		reverse_complement=True, random_state=None):
 		self.trimming = trimming
 		self.window = window
@@ -228,12 +309,19 @@ class GenomewideGenerator(torch.utils.data.Dataset):
 		self.reverse_complement = reverse_complement
 		self.random_state = numpy.random.RandomState(random_state)
 
+		if cell_weights is not None:
+			cell_weights = numpy.array(cell_weights, dtype=numpy.float32)
+			cell_weights = cell_weights / cell_weights.sum() 
+
+		self.cell_weights = cell_weights
+
 		self.signal = {chrom: signal[chrom] for chrom in chroms}
 		self.sequence = {chrom: sequence[chrom] for chrom in chroms}
 		self.neighbors = neighbors
 		self.cell_states = cell_states
 		self.read_depths = read_depths
-		self._lengths = numpy.array([seq.shape[1] for seq in self.sequence.values()])
+		self._lengths = numpy.array([seq.shape[1] for seq in 
+			self.sequence.values()])
 		self._chrom_probs = self._lengths / self._lengths.sum()
 
 	def __len__(self):
@@ -244,69 +332,7 @@ class GenomewideGenerator(torch.utils.data.Dataset):
 		chrom = self.chroms[c_idx]
 
 		mid = numpy.random.randint(10000, self._lengths[c_idx]-10000)
-		cell_idx = numpy.random.randint(self.cell_states.shape[0])
+		cell_idx = numpy.random.choice(len(self.cell_states), 
+			p=self.cell_weights)
+		
 		return _extract_example(self, chrom, mid, cell_idx, idx)
-
-
-class GenomewideWeightedGenerator(torch.utils.data.Dataset):
-    """A data generator for dragonnfruit inputs. Adapted from bpnet-lite.
-
-
-    Parameters
-    ----------
-    sequences: dict of torch.tensors, shape=(n, 4), dtype=torch.float32
-        A dictionary of the nucleotide sequences to use.
-
-    signals: dict of torch.tensors, shape=(n, n_cells), dtype=torch.float32
-        A dictionary of the cell signals
-
-    loci: str or pandas.DataFrame
-        A set of loci to use.
-
-    cell_states: 
-    """
-
-    def __init__(self, sequence, signal, neighbors, cell_states, 
-        read_depths, trimming, window, chroms, 
-        reverse_complement=True, random_state=None):
-        self.trimming = trimming
-        self.window = window
-        self.chroms = chroms
-        self.reverse_complement = reverse_complement
-        self.random_state = numpy.random.RandomState(random_state)
-
-        self.signal = {chrom: signal[chrom] for chrom in chroms}
-        self.sequence = {chrom: sequence[chrom] for chrom in chroms}
-        self.neighbors = neighbors
-        self.cell_states = cell_states
-        self.read_depths = read_depths
-
-        self.weights = {}
-        self._chrom_probs = numpy.zeros(len(chroms))
-        for i, chrom in enumerate(chroms):
-            X = self.signal[chrom]
-            X = numpy.diff(X.indptr)
-            X = X[:X.shape[0]//1000*1000].reshape(-1, 1000).sum(axis=1)
-            X = numpy.log(X+1)+1
-            X[:10000] = 0
-            X[-10000:] = 0
-            
-            self.weights[chrom] = X / X.sum()
-            self._chrom_probs[i] = X.sum()
-            
-        self._chrom_probs /= self._chrom_probs.sum()
-        
-    def __len__(self):
-        return 999999999
-
-    def __getitem__(self, idx):
-        chrom_idx = numpy.random.choice(len(self._chrom_probs),
-        	p=self._chrom_probs)
-        chrom = self.chroms[chrom_idx]
-
-        w = self.weights[chrom]
-        mid = numpy.random.choice(len(w), p=w) * 1000
-        mid += numpy.random.randint(1000)
-        
-        cell_idx = numpy.random.randint(self.cell_states.shape[0])
-        return _extract_example(self, chrom, mid, cell_idx, idx)

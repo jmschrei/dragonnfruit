@@ -94,7 +94,7 @@ default_preprocess_atac_parameters = {
 	'loci': None,
 	'signals':'dragonnfruit_data.h5',
 	'read_depths':'atac_read_depths.npz',
-	'count_matrix': 'atac_cellxpeak_counts.npz',
+	'count_matrix': 'atac_cellxlocus_counts.npz',
 	'pca': 'atac_pca.npz',
 	'neighbors': 'atac_neighbors.npz',
 	'chrom_sizes': None,
@@ -104,10 +104,15 @@ default_preprocess_atac_parameters = {
 		'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 
 		'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 
 		'chr22', 'chrX'],
+	'training_chroms': ['chr1', 'chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 
+		'chr8', 'chr9', 'chr10', 'chr11', 'chr12', 'chr13', 'chr14', 
+		'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 'chr20', 'chr21', 
+		'chr22', 'chrX'],
 	'cell_name_prefixes': None,
 	'max_fragment_length': 1000,
 	'start_offset': 4,
 	'end_offset': -5,
+	'tile_size': None,
 	'n_components': 50,
 	'n_neighbors': 500,
 	'n_jobs': -1,
@@ -336,7 +341,7 @@ def merge_parameters(parameters, default_parameters):
 		parameters = json.load(infile)
 
 	optional = ['controls', 'cell_representation', 'bias_model', 'min_counts', 
-		'max_counts']
+		'max_counts', 'loci', 'tile_size']
 
 	for parameter, value in default_parameters.items():
 		if parameter not in parameters:
@@ -386,7 +391,8 @@ if args.cmd == "preprocess-atac":
 		print("Calculating cell state representations...")
 
 	cellxlocus, X_pca, neighbors = preprocess_sparse_atac(X_cscs, 
-		peaks=parameters['loci'], chroms=parameters['chroms'],
+		peaks=parameters['loci'], tile_size=parameters['tile_size'],
+		chroms=parameters['training_chroms'],
 		n_components=parameters['n_components'], 
 		n_neighbors=parameters['n_neighbors'],
 		verbose=parameters['verbose'])
