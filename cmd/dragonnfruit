@@ -29,6 +29,8 @@ from dragonnfruit.models import CellStateController
 from dragonnfruit.models import DynamicBPNet
 from dragonnfruit.models import DragoNNFruit
 
+from bpnetlite.bpnet import BPNet
+
 from tqdm import tqdm
 
 torch.backends.cudnn.benchmark = True
@@ -135,10 +137,12 @@ default_fit_parameters = {
 	'out_window': 1000,
 	'max_jitter': 128,
 	'reverse_complement': True,
-	'max_epochs': 50,
 	'validation_iter': 100,
 	'n_validation_examples': 10000,
-	'lr': 0.0001,
+	'lr': 0.0005,
+	'start_factor': 1e-4,
+	'first_iters': 100,
+	'second_iters': 900,
 	'alpha': 10,
 	'beta': 0.5,
 	'verbose': False,
@@ -159,120 +163,10 @@ default_fit_parameters = {
 	'neighbors': None,
 	'read_depths': None,
 	'random_state': None,
-	'k': 500
+	'k': 500,
+	'dtype': 'bfloat16'
 }
 
-default_predict_parameters = {
-	'batch_size': 64,
-	'in_window': 2114,
-	'out_window': 1000,
-	'verbose': False,
-	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
-		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
-		'chr20', 'chr21', 'chr22', 'chrX'],
-	'sequences': None,
-	'loci': None,
-	'controls': None,
-	'model': None,
-	'profile_filename': 'y_profile.npz',
-	'counts_filename': 'y_counts.npz'
-}
-
-default_interpret_parameters = {
-	'batch_size': 1,
-	'in_window': 2114,
-	'out_window': 1000,
-	'verbose': False,
-	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
-		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
-		'chr20', 'chr21', 'chr22', 'chrX'],
-	'sequences': None,
-	'loci': None,
-	'model': None,
-	'output': 'profile',
-	'ohe_filename': 'ohe.npz',
-	'attr_filename': 'attr.npz',
-	'n_shuffles':20,
-	'random_state':0
-}
-
-default_marginalize_parameters = {
-	'batch_size': 64,
-	'in_window': 2114,
-	'out_window': 1000,
-	'verbose': False,
-	'chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 'chr9', 'chr11', 
-		'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 'chr18', 'chr19', 
-		'chr20', 'chr21', 'chr22', 'chrX'],
-	'sequences': None,
-	'motifs': None,
-	'loci': None,
-	'n_loci': None,
-	'shuffle': False,
-	'model': None,
-	'output_filename':'marginalize/',
-	'random_state':0,
-	'minimal': True
-}
-
-default_pipeline_parameters = {
-	# Model architecture parameters
-	'n_filters': 64,
-	'n_layers': 8,
-	'bias_n_filters': 64,
-	'bias_n_layers': 4,
-	'profile_output_bias': True,
-	'count_output_bias': True,
-	'in_window': 2114,
-	'out_window': 1000,
-	'name': None,
-	'model': None,
-	'bias_model': None,
-	'accessibility_model': None,
-
-	# Data parameters
-	'batch_size': 64,
-	'max_jitter': 128,
-	'reverse_complement': True,
-	'max_epochs': 50,
-	'validation_iter': 100,
-	'lr': 0.001,
-	'alpha': 1,
-	'verbose': False,
-	'min_counts': 0,
-	'max_counts': 99999999,
-	'training_chroms': ['chr2', 'chr3', 'chr4', 'chr5', 'chr6', 'chr7', 
-		'chr9', 'chr11', 'chr12', 'chr13', 'chr14', 'chr15', 'chr16', 'chr17', 
-		'chr18', 'chr19', 'chr20', 'chr21', 'chr22', 'chrX'],
-	'validation_chroms': ['chr8', 'chr10'],
-	'random_state': None,
-
-	# Input file parameters
-	'sequences': None,
-	'loci': None,
-	'negatives': None,
-	'signals': None,
-	'controls': None,
-
-	# Output file parameters
-	'profile_filename': None,
-	'counts_filename': None,
-
-	'output': 'profile',
-	'ohe_filename': None,
-	'attr_filename': None,
-	'n_shuffles':20,
-
-	'n_seqlets': 100000,
-	'modisco_filename': None,
-	'modisco_motifs': None,
-
-	'n_loci': None,
-	'shuffle': False,
-	'marginalization_filename': None,
-	'marginalization_motifs': None,
-	'minimal': True
-}
 
 
 ###
@@ -440,13 +334,12 @@ if args.cmd == 'fit':
 		read_depths = numpy.load(parameters['read_depths'])
 
 	read_depths = read_depths[neighbors].sum(axis=1)
-	read_depths = numpy.log2(read_depths + 1)
-	read_depths = read_depths.reshape(-1, 1)
+	read_depths = numpy.log2(read_depths + 1).reshape(-1, 1)
 
 	chroms = parameters['training_chroms'] + parameters['validation_chroms']
 
 	signals = load_data(parameters['signals'])
-	sequences = extract_fasta(parameters['sequences'], chroms=chroms, n_jobs=-1)
+	sequences = extract_fasta(parameters['sequences'], chroms=chroms)
 
 	trimming = (parameters['in_window'] - parameters['out_window']) // 2
 
@@ -473,7 +366,7 @@ if args.cmd == 'fit':
 	X_valid = LocusGenerator(
 		sequence=sequences,
 		signal=signals,
-		loci_file=parameters['loci'],
+		loci=parameters['loci'],
 		neighbors=neighbors,
 		cell_states=cell_states,
 		read_depths=read_depths,
@@ -483,8 +376,19 @@ if args.cmd == 'fit':
 		random_state=0)
 
 	if parameters['bias_model'] is not None:
-		bias_model = torch.load(parameters['bias_model'], 
-			map_location='cpu').eval().cuda()
+		bias_path = parameters['bias_model']
+
+		try:
+			bias_model = BPNet.from_chrombpnet_lite(bias_path).cuda()
+		except:
+			try:
+				bias_model = BPNet.from_chrombpnet(bias_path).cuda()
+			except:
+				try: 
+					bias_model = torch.load(bias_path).cuda()
+				except:
+					raise ValueError("Bias model cannot be loaded.")
+
 	else: 
 		awdad
 
@@ -502,12 +406,31 @@ if args.cmd == 'fit':
 
 	model = DragoNNFruit(bias_model, accessibility_model, 
 		parameters['name']).cuda()
-	optimizer = torch.optim.Adam(model.parameters(), 
+	optimizer = torch.optim.AdamW(model.parameters(), 
 		lr=parameters['lr'])
 
-	model.fit(X, X_valid, optimizer, 
-		n_validation_samples=parameters['n_validation_examples'], 
-		max_epochs=parameters['max_epochs'], 
+	scheduler1 = torch.optim.lr_scheduler.LinearLR(optimizer, 
+		start_factor=parameters['start_factor'], end_factor=1.0, 
+		total_iters=parameters['first_iters'], last_epoch=-1, verbose=True) 
+	scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, 
+		T_max=parameters['second_iters'], last_epoch=-1, verbose=True)
+	scheduler = torch.optim.lr_scheduler.SequentialLR(optimizer, 
+		[scheduler1, scheduler2], milestones=[parameters['first_iters']], 
+		last_epoch=-1)
+
+	dtype = {
+		'float32': torch.float32,
+		'bfloat16': torch.bfloat16,
+		'float16': torch.float16
+	}[parameters['dtype']]
+
+	max_iter = parameters['first_iters'] + parameters['second_iters']
+	max_iter *= parameters['validation_iter']
+
+	model.fit(X, X_valid, optimizer, scheduler,
+		n_valid=parameters['n_validation_examples'],
+		max_iter=max_iter,
 		validation_iter=parameters['validation_iter'], 
-		batch_size=parameters['batch_size']
+		batch_size=parameters['batch_size'],
+		dtype=dtype
 	)

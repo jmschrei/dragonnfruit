@@ -404,7 +404,7 @@ class DragoNNFruit(torch.nn.Module):
 
 				start = time.time()
 
-		torch.save(self, "{}.{}.torch".format(self.name, epoch))
+		torch.save(self, "{}.torch".format(self.name))
 
 
 class DynamicBPNet(torch.nn.Module):

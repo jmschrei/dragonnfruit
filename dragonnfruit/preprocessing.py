@@ -612,7 +612,6 @@ def extract_cellxpeak(X, peaks, chroms=None, verbose=False):
 	data, indices, indptr = [], [], [0]
 	for i, (chrom, start, end) in tqdm(peaks.iterrows(), disable=d):
 		if chrom not in chroms:
-			print(chrom)
 			continue
 
 		peak = X[chrom][:, start:end+1]
