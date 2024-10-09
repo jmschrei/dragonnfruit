@@ -16,6 +16,7 @@ setup(
         "pandas >= 1.3.3",
         "pyBigWig >= 0.3.17",
         "torch >= 1.9.0",
-        "tables >= 3.8.0"
+        "tables >= 3.8.0",
+        "numba >= 0.55"
     ],
 )
