@@ -489,7 +489,7 @@ def extract_fragments(fragments, chrom_sizes, chroms=None, include_cells=None,
 
 
 	if cell_name_prefixes is None:
-		cell_name_prefixes = [None for i in range(n_files)]
+		cell_name_prefixes = ['' for i in range(n_files)]
 
 
 	# Load the chromosome sizes 
