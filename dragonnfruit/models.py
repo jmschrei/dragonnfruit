@@ -378,7 +378,7 @@ class DragoNNFruit(torch.nn.Module):
 
 				# Calculate count correlation
 				y_hat_ = torch.logsumexp(y_hat, dim=-1)
-				valid_count_corr = pearson_corr(y_hat_, y_valid.sum(dim=-1))
+				valid_count_corr = pearson_corr(y_hat_, torch.log2(y_valid.sum(dim=-1) + 1))
 				valid_count_corr = valid_count_corr.mean().item()
 
 				# Calculate profile correlation
